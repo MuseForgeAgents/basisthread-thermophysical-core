@@ -68,18 +68,33 @@ constexpr double RSTAR_GERG = 8.314510;  ///< J/mol/K
 ///                         - n0[5]*ln(|cosh(theta0[5]*Tc/T)|)
 ///                         - n0[7]*ln(|cosh(theta0[7]*Tc/T)|) ]
 ///
-/// SIGN CONVENTION (load-bearing for Task 8): every n0 is stored with the
-/// POSITIVE sign as published.  The minus in front of the two cosh terms
-/// lives in the *expression above*, not in the stored coefficient.  That
-/// matches CoolProp's IdealHelmholtzGERG2004Cosh::all (src/Helmholtz.cpp),
-/// which accumulates `-n[i]*log(|cosh(...)|)` and therefore also expects the
-/// published, positive n.  Handing it a negated n0[5]/n0[7] would silently
-/// flip the sign of those contributions to h and s.
+/// SIGN CONVENTION (load-bearing for Task 8): every n0 is stored exactly as
+/// published, UN-NEGATED.  Some published n0 are themselves negative (methane's
+/// n0[7] is -4.46921); "stored as published" is the rule, not "stored
+/// positive".  The minus in front of the two cosh terms belongs to the
+/// *expression above*, not to the coefficient.  CoolProp's
+/// IdealHelmholtzGERG2004Cosh::all (src/Helmholtz.cpp) accumulates
+/// `-n[i]*log(|cosh(...)|)`, i.e. it applies that minus itself, so it must be
+/// handed n0[5] and n0[7] unmodified.  Negating them on the way in would
+/// silently flip those contributions to h and s while leaving p, c_v and w
+/// untouched.  IdealHelmholtzGERG2004Sinh accumulates `+n[i]*log(|sinh(...)|)`,
+/// so n0[4] and n0[6] likewise go in unmodified.
 ///
 /// UNITS: n0 and theta0 are dimensionless; theta0 multiplies Tc/T.  The
 /// (R*/R) prefactor scales the WHOLE bracket and is NOT folded into the
 /// stored coefficients, so Task 8 must apply it itself (CoolProp's
 /// GERG2004Cosh/GERG2004Sinh terms do not know about it).
+///
+/// MIXTURES (load-bearing for Task 8): Tc here is the COMPONENT's own
+/// PureInfo::Tc_K, not the mixture reducing temperature T_red.  CoolProp's
+/// ideal-gas terms work in tau = T_red/T, so for a mixture the first three
+/// terms have to be re-expressed:
+///   n0[2]*Tc/T     = (n0[2]*Tc/T_red) * tau
+///   n0[3]*ln(Tc/T) = n0[3]*ln(tau) + n0[3]*ln(Tc/T_red)
+/// i.e. Tc/T_red must be folded into the n0[2] coefficient and the constant
+/// n0[3]*ln(Tc/T_red) added.  For a pure fluid T_red == Tc and both corrections
+/// vanish, so getting this wrong is invisible to pure-fluid tests and corrupts
+/// only mixtures.
 struct AlphaigCoeffs
 {
     std::vector<double> n0, theta0;

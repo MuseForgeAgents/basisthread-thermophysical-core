@@ -3,6 +3,7 @@
 #    include <catch2/matchers/catch_matchers_floating_point.hpp>
 
 #    include <cmath>
+#    include <iterator>
 
 #    include "CoolProp/AbstractState.h"
 #    include "CoolProp/DataStructures.h"
@@ -208,18 +209,34 @@ TEST_CASE("GERG ideal-gas integration constants zero h and s at the reference st
 }
 
 TEST_CASE("GERG recomputed integration constants match an independent solve", "[GERG]") {
-    // A finite difference can hide a small systematic error, so the values
-    // below come from a completely independent implementation: a NumPy
-    // script that rebuilds teqp's 2x2 system from scratch, solves it with
-    // numpy.linalg.solve (LU with partial pivoting, not Cramer's rule) and
-    // verifies h and s vanish using ANALYTIC derivatives.  See
-    // task-4-report.md for the transcript.
+    // THIS IS THE TRANSCRIPTION GUARD FOR THE WHOLE IDEAL-GAS TABLE.
     //
-    // Corroboration that the reference state and the R*/R placement are both
-    // right: for the two components whose ideal-gas constants GERG-2008
-    // regenerated (carbon monoxide and hydrogen sulfide) this recomputation
-    // reproduces the PUBLISHED n0[1] and n0[2] to ~1e-9, i.e. to the full
-    // precision printed in the monograph.
+    // {n0[1], n0[2]} is a complete fingerprint of a component's ideal-gas
+    // row: n0[3..7], theta0[4..7], Tc and rhoc all feed the 2x2 solve, so a
+    // single corrupted digit anywhere in the row moves these two numbers far
+    // beyond the 1e-12 tolerance below.  That matters because the h = s = 0
+    // test cannot catch a transcription error at all -- corrupting, say,
+    // propane's theta0[6] leaves the solver and the evaluator mutually
+    // consistent and h and s still vanish.  Every (model, component) pair is
+    // therefore listed here: 18 for GERG-2004 and 21 for GERG-2008.
+    //
+    // The literals come from a completely independent implementation -- a
+    // NumPy script that rebuilds teqp's 2x2 system from scratch, solves it
+    // with numpy.linalg.solve (LU with partial pivoting, not Cramer's rule)
+    // and verifies h and s vanish using ANALYTIC derivatives.  They were NOT
+    // captured from this backend's own output, so they assert what the
+    // coefficients should be rather than what the code currently does.  See
+    // task-4-report.md for the script and its transcript.
+    //
+    // This test case is also what pins the R*/R convention, and it is the
+    // ONLY thing that does.  The h = s = 0 test cannot: moving the ratio from
+    // outside the bracket (GERG-2008 / teqp) to inside it (GERG-2004) simply
+    // rescales n0[1] and n0[2] by exactly R*/R, leaving alpha^0 bit-identical,
+    // so h and s still vanish.  What these literals catch is (a) that
+    // convention swap, which changes them by 4.6e-6 relative, and (b) an
+    // outright coding error that drops the ratio, which changes them by
+    // 1.8e-8 to 3.4e-6 relative.  Both are enormous against a 1e-12
+    // tolerance.
     struct Expect
     {
         GERGModel model;
@@ -228,13 +245,49 @@ TEST_CASE("GERG recomputed integration constants match an independent solve", "[
     };
     const Expect cases[] = {
       {GERGModel::GERG_2004, "methane", 19.597508817430203, -83.95966789022567},
-      {GERGModel::GERG_2004, "water", 8.216535516334572, -12.002441239189446},
+      {GERGModel::GERG_2004, "nitrogen", 11.083407489057498, -22.202102427578456},
+      {GERGModel::GERG_2004, "carbondioxide", 11.925152757587837, -16.118762264778105},
+      {GERGModel::GERG_2004, "ethane", 24.67543752664495, -77.42531376123445},
+      {GERGModel::GERG_2004, "propane", 31.602908195059367, -84.46328438999367},
+      {GERGModel::GERG_2004, "n-butane", 20.88414336067719, -91.63847802844411},
+      {GERGModel::GERG_2004, "isobutane", 20.413726078976026, -94.46762003594714},
+      {GERGModel::GERG_2004, "n-pentane", 28.587336515506692, -96.26533664852582},
+      {GERGModel::GERG_2004, "isopentane", 29.158567601789613, -111.21604889349067},
+      {GERGModel::GERG_2004, "n-hexane", 32.49945909536515, -103.869150116756},
+      {GERGModel::GERG_2004, "n-heptane", 37.237679270562055, -105.72419451985124},
+      {GERGModel::GERG_2004, "n-octane", 42.1431834637039, -106.34926315689664},
       {GERGModel::GERG_2004, "hydrogen", 13.79644339318705, -175.86448729341214},
-      {GERGModel::GERG_2004, "argon", 8.316631499886697, -4.946502600476912},
+      {GERGModel::GERG_2004, "oxygen", 10.001843585817623, -14.996095135028263},
       {GERGModel::GERG_2004, "carbonmonoxide", 10.814470255578003, -19.843695434544927},
+      {GERGModel::GERG_2004, "water", 8.216535516334572, -12.002441239189446},
+      {GERGModel::GERG_2004, "helium", 13.628409737317194, -143.47075960157534},
+      {GERGModel::GERG_2004, "argon", 8.316631499886697, -4.946502600476912},
+
+      {GERGModel::GERG_2008, "methane", 19.597508817430203, -83.95966789022567},
+      {GERGModel::GERG_2008, "nitrogen", 11.083407489057498, -22.202102427578456},
+      {GERGModel::GERG_2008, "carbondioxide", 11.925152757587837, -16.118762264778105},
+      {GERGModel::GERG_2008, "ethane", 24.67543752664495, -77.42531376123445},
+      {GERGModel::GERG_2008, "propane", 31.602908195059367, -84.46328438999367},
+      {GERGModel::GERG_2008, "n-butane", 20.88414336067719, -91.63847802844411},
+      {GERGModel::GERG_2008, "isobutane", 20.413726078976026, -94.46762003594714},
+      {GERGModel::GERG_2008, "n-pentane", 28.587336515506692, -96.26533664852582},
+      {GERGModel::GERG_2008, "isopentane", 29.15856192130587, -111.21604889349067},
+      {GERGModel::GERG_2008, "n-hexane", 32.49945909536515, -103.869150116756},
+      {GERGModel::GERG_2008, "n-heptane", 37.237679270562055, -105.72419451985124},
+      {GERGModel::GERG_2008, "n-octane", 42.1431834637039, -106.34926315689664},
+      {GERGModel::GERG_2008, "hydrogen", 13.79644339318705, -175.86448729341214},
+      {GERGModel::GERG_2008, "oxygen", 10.001843585817623, -14.996095135028263},
       {GERGModel::GERG_2008, "carbonmonoxide", 10.813340744153283, -19.834733958634743},
+      {GERGModel::GERG_2008, "water", 8.216535516334572, -12.002441239189446},
+      {GERGModel::GERG_2008, "helium", 13.628409737317194, -143.47075960157534},
+      {GERGModel::GERG_2008, "argon", 8.316631499886697, -4.946502600476912},
+      {GERGModel::GERG_2008, "hydrogensulfide", 9.33619774177303, -16.266508993594602},
+      {GERGModel::GERG_2008, "n-nonane", 46.72362520349981, -112.01770583722839},
       {GERGModel::GERG_2008, "n-decane", 50.35302335379572, -120.01206647981711},
     };
+    // Guard against a component being dropped from the list above.
+    CHECK(std::size(cases) == component_names(GERGModel::GERG_2004).size() + component_names(GERGModel::GERG_2008).size());
+
     for (const auto& e : cases) {
         CAPTURE(e.name);
         auto c = get_alphaig_coeffs(e.model, e.name);

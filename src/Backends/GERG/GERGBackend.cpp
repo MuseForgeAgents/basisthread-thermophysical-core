@@ -359,6 +359,13 @@ AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name) 
         const auto& base = alphaig_2004();
         auto it = base.find(gerg_name);
         if (it == base.end()) {
+            // Unreachable with the tables as shipped: get_pure_info above has
+            // already rejected anything outside component_names(model), and
+            // the two ideal-gas tables cover every name in it.  Kept as a
+            // drift guard -- if a component is ever added to component_names
+            // without an ideal-gas row, this fires (the "padded monograph
+            // shape" test sweeps every component of both models, so it fires
+            // in the test suite rather than in user code).
             throw ValueError(format("Unable to load GERG ideal-gas coefficients for [%s]", gerg_name.c_str()));
         }
         c = pad_alphaig(gerg_name, it->second);
