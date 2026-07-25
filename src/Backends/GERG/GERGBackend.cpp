@@ -524,6 +524,194 @@ AlphaigCoeffs pad_alphaig(const std::string& gerg_name, const RawAlphaig& raw) {
     return c;
 }
 
+// Departure-function tables: F_ij scaling factors and departure coefficients.
+//
+// Transcribed from teqp (https://github.com/usnistgov/teqp),
+// include/teqp/models/GERG/GERG.hpp: get_Fij (lines 768-802, Table A3.6) and
+// get_departurecoeffs (lines 805-900), both in namespace GERG2004.
+// GERG-2008 reuses both unchanged (teqp GERG.hpp:999-1001, `using
+// GERG2004::get_Fij; using GERG2004::get_departurecoeffs;`), so there is a
+// single shared table here rather than a 2004/2008 override pair like the
+// tables above.
+//
+// Exactly 15 of the 153 possible GERG-2004 pairs carry a departure function.
+// 7 pairs (methane/nitrogen, methane/carbondioxide, methane/ethane,
+// methane/propane, nitrogen/carbondioxide, nitrogen/ethane, methane/hydrogen)
+// have fluid-pair-specific coefficients and F_ij == 1 exactly. The other 8
+// pairs share one "generalized" departure function, scaled per-pair by
+// F_ij; 7 of those 8 have F_ij != 1, and the 8th (methane/n-butane) also
+// uses the generalized form but happens to have F_ij == 1.
+
+/// Table A3.6, GERG-2004 monograph.  15 pairs.  teqp GERG.hpp:771-787.
+/// SYMMETRIC: F_ij == F_ji exactly.  Unlike BetasGammas above, nothing is
+/// reciprocated on a reversed-order lookup.
+const std::map<BIPKey, double>& fij_table() {
+    static const std::map<BIPKey, double> data = {
+      {{"methane", "nitrogen"}, 1.0},
+      {{"methane", "carbondioxide"}, 1.0},
+      {{"methane", "ethane"}, 1.0},
+      {{"methane", "propane"}, 1.0},
+      {{"methane", "n-butane"}, 1.0},
+      {{"methane", "isobutane"}, 0.771035405688},
+      {{"methane", "hydrogen"}, 1.0},
+      {{"nitrogen", "carbondioxide"}, 1.0},
+      {{"nitrogen", "ethane"}, 1.0},
+      {{"ethane", "propane"}, 0.130424765150},
+      {{"ethane", "n-butane"}, 0.281570073085},
+      {{"ethane", "isobutane"}, 0.260632376098},
+      {{"propane", "n-butane"}, 0.0312572600489},
+      {{"propane", "isobutane"}, -0.0551609771024},
+      {{"n-butane", "isobutane"}, -0.0551240293009},
+    };
+    return data;
+}
+
+/// teqp GERG.hpp:818-827.
+DepartureCoeffs departure_methane_nitrogen() {
+    DepartureCoeffs dc;
+    dc.n = {-0.98038985517335e-2, 0.42487270143005e-3, -0.34800214576142e-1, -0.13333813013896, -0.11993694974627e-1,
+            0.69243379775168e-1,  -0.31022508148249,   0.24495491753226,     0.22369816716981};
+    dc.d = {1, 4, 1, 2, 2, 2, 2, 2, 3};
+    dc.t = {0.000, 1.850, 7.850, 5.400, 0.000, 0.750, 2.800, 4.450, 4.250};
+    dc.eta = {0, 0, 1.000, 1.000, 0.250, 0.000, 0.000, 0.000, 0.000};
+    dc.epsilon = {0, 0, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5};
+    dc.beta = {0, 0, 1.0, 1.0, 2.5, 3.0, 3.0, 3.0, 3.0};
+    dc.gamma = {0, 0, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:828-837.
+DepartureCoeffs departure_methane_carbondioxide() {
+    DepartureCoeffs dc;
+    dc.n = {-0.10859387354942, 0.80228576727389e-1, -0.93303985115717e-2, 0.40989274005848e-1, -0.24338019772494, 0.23855347281124};
+    dc.d = {1, 2, 3, 1, 2, 3};
+    dc.t = {2.600, 1.950, 0.000, 3.950, 7.950, 8.000};
+    dc.eta = {0, 0, 0, 1.000, 0.500, 0.000};
+    dc.epsilon = {0, 0, 0, 0.5, 0.5, 0.5};
+    dc.beta = {0, 0, 0, 1.0, 2.0, 3.0};
+    dc.gamma = {0, 0, 0, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:838-847 (there stored as sortpair("ethane","methane")).
+DepartureCoeffs departure_methane_ethane() {
+    DepartureCoeffs dc;
+    dc.n = {-0.80926050298746e-3, -0.75381925080059e-3, -0.41618768891219e-1, -0.23452173681569,  0.14003840584586,    0.63281744807738e-1,
+            -0.34660425848809e-1, -0.23918747334251,    0.19855255066891e-2,  0.61777746171555e1, -0.69575358271105e1, 0.10630185306388e1};
+    dc.t = {0.650, 1.550, 3.100, 5.900, 7.050, 3.350, 1.200, 5.800, 2.700, 0.450, 0.550, 1.950};
+    dc.d = {3, 4, 1, 2, 2, 2, 2, 2, 2, 3, 3, 3};
+    dc.eta = {0, 0, 1.000, 1.000, 1.000, 0.875, 0.750, 0.500, 0.000, 0.000, 0.000, 0.000};
+    dc.epsilon = {0, 0, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500};
+    dc.beta = {0, 0, 1.000, 1.000, 1.000, 1.250, 1.500, 2.000, 3.000, 3.000, 3.000, 3.000};
+    dc.gamma = {0, 0, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:848-857 (there stored as sortpair("propane","methane")).
+DepartureCoeffs departure_methane_propane() {
+    DepartureCoeffs dc;
+    dc.n = {0.13746429958576e-1, -0.74425012129552e-2, -0.45516600213685e-2, -0.54546603350237e-2, 0.23682016824471e-2,
+            0.18007763721438,    -0.44773942932486,    0.19327374888200e-1,  -0.30632197804624};
+    dc.t = {1.850, 3.950, 0.000, 1.850, 3.850, 5.250, 3.850, 0.200, 6.500};
+    dc.d = {3, 3, 4, 4, 4, 1, 1, 1, 2};
+    dc.eta = {0, 0, 0, 0, 0, 0.250, 0.250, 0.000, 0.000};
+    dc.epsilon = {0, 0, 0, 0, 0, 0.500, 0.500, 0.500, 0.500};
+    dc.beta = {0, 0, 0, 0, 0, 0.750, 1.000, 2.000, 3.000};
+    dc.gamma = {0, 0, 0, 0, 0, 0.500, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:858-867.
+DepartureCoeffs departure_nitrogen_carbondioxide() {
+    DepartureCoeffs dc;
+    dc.n = {0.28661625028399, -0.10919833861247, -0.11374032082270e1, 0.76580544237358, 0.42638000926819e-2, 0.17673538204534};
+    dc.d = {2, 3, 1, 1, 1, 2};
+    dc.t = {1.850, 1.400, 3.200, 2.500, 8.000, 3.750};
+    dc.eta = {0, 0, 0.250, 0.250, 0.000, 0.000};
+    dc.epsilon = {0, 0, 0.500, 0.500, 0.500, 0.500};
+    dc.beta = {0, 0, 0.750, 1.000, 2.000, 3.000};
+    dc.gamma = {0, 0, 0.500, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:868-877.
+DepartureCoeffs departure_nitrogen_ethane() {
+    DepartureCoeffs dc;
+    dc.n = {-0.47376518126608, 0.48961193461001, -0.57011062090535e-2, -0.19966820041320, -0.69411103101723, 0.69226192739021};
+    dc.d = {2, 2, 3, 1, 2, 2};
+    dc.t = {0.000, 0.050, 0.000, 3.650, 4.900, 4.450};
+    dc.eta = {0, 0, 0, 1.000, 1.000, 0.875};
+    dc.epsilon = {0, 0, 0, 0.500, 0.500, 0.500};
+    dc.beta = {0, 0, 0, 1.000, 1.000, 1.250};
+    dc.gamma = {0, 0, 0, 0.500, 0.500, 0.500};
+    return dc;
+}
+
+/// teqp GERG.hpp:878-887.
+DepartureCoeffs departure_methane_hydrogen() {
+    DepartureCoeffs dc;
+    dc.n = {-0.25157134971934, -0.62203841111983e-2, 0.88850315184396e-1, -0.35592212573239e-1};
+    dc.t = {2.000, -1.000, 1.750, 1.400};
+    dc.d = {1, 3, 3, 4};
+    dc.eta = {0, 0, 0, 0};
+    dc.epsilon = {0, 0, 0, 0};
+    dc.beta = {0, 0, 0, 0};
+    dc.gamma = {0, 0, 0, 0};
+    return dc;
+}
+
+/// The 7 pairs above, each with its own fluid-pair-specific departure
+/// coefficients.  Looked up in either order by get_departurecoeffs; no
+/// reciprocation applies to any field here (unlike BetasGammas).
+const std::map<BIPKey, DepartureCoeffs>& departure_specific_table() {
+    static const std::map<BIPKey, DepartureCoeffs> data = {
+      {{"methane", "nitrogen"}, departure_methane_nitrogen()},
+      {{"methane", "carbondioxide"}, departure_methane_carbondioxide()},
+      {{"methane", "ethane"}, departure_methane_ethane()},
+      {{"methane", "propane"}, departure_methane_propane()},
+      {{"nitrogen", "carbondioxide"}, departure_nitrogen_carbondioxide()},
+      {{"nitrogen", "ethane"}, departure_nitrogen_ethane()},
+      {{"methane", "hydrogen"}, departure_methane_hydrogen()},
+    };
+    return data;
+}
+
+/// The "generalized" departure function, teqp GERG.hpp:888-896.  Shared,
+/// unmodified, by all 8 pairs in generalized_departure_pairs() below; each
+/// pair scales it by its own F_ij (fij_table() above).  Every term here is
+/// polynomial (eta == beta == 0 for all 10 terms): this departure function
+/// has no Gaussian block at all.
+DepartureCoeffs generalized_departure() {
+    DepartureCoeffs dc;
+    dc.n = {0.25574776844118e1, -0.79846357136353e1, 0.47859131465806e1, -0.73265392369587, 1.3805471345312,
+            0.28349603476365,   -0.49087385940425,   -0.10291888921447,  0.11836314681968,  0.55527385721943e-4};
+    dc.d = {1, 1, 1, 2, 2, 3, 3, 4, 4, 4};
+    dc.t = {1.000, 1.550, 1.700, 0.250, 1.350, 0.000, 1.250, 0.000, 0.700, 5.400};
+    dc.eta = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    dc.epsilon = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    dc.beta = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    dc.gamma = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    return dc;
+}
+
+/// teqp GERG.hpp:811-815 (the `generalized` std::set, sorted-pair form).
+/// 8 pairs; 7 of them have F_ij != 1 (fij_table() above), the 8th
+/// (methane/n-butane) has F_ij == 1 but still uses this generalized form
+/// rather than the corresponding-states term alone.
+const std::vector<BIPKey>& generalized_departure_pairs() {
+    static const std::vector<BIPKey> pairs = {
+      {"methane", "n-butane"}, {"methane", "isobutane"}, {"ethane", "propane"},    {"ethane", "n-butane"},
+      {"ethane", "isobutane"}, {"propane", "n-butane"},  {"propane", "isobutane"}, {"n-butane", "isobutane"},
+    };
+    return pairs;
+}
+
+bool is_generalized_departure_pair(const std::string& f1, const std::string& f2) {
+    const auto& pairs = generalized_departure_pairs();
+    return std::find(pairs.begin(), pairs.end(), BIPKey{f1, f2}) != pairs.end()
+           || std::find(pairs.begin(), pairs.end(), BIPKey{f2, f1}) != pairs.end();
+}
+
 }  // namespace
 
 PureCoeffs get_pure_coeffs(GERGModel model, const std::string& gerg_name) {
@@ -701,6 +889,58 @@ BetasGammas get_betasgammas(GERGModel model, const std::string& f1, const std::s
         return bg;
     }
     throw ValueError(format("Unable to obtain GERG binary reducing parameters for the pair [%s, %s]", f1.c_str(), f2.c_str()));
+}
+
+bool get_Fij(GERGModel model, const std::string& f1, const std::string& f2, double& F) {
+    // GERG-2008 reuses GERG-2004's F_ij unchanged, so model does not select
+    // between two tables here (unlike get_pure_info/get_betasgammas above).
+    (void)model;
+    const auto& table = fij_table();
+    auto it = table.find({f1, f2});
+    if (it != table.end()) {
+        F = it->second;
+        return true;
+    }
+    auto rit = table.find({f2, f1});
+    if (rit != table.end()) {
+        F = rit->second;
+        return true;
+    }
+    return false;
+}
+
+DepartureCoeffs get_departurecoeffs(GERGModel model, const std::string& f1, const std::string& f2) {
+    // GERG-2008 reuses GERG-2004's departure coefficients unchanged.
+    (void)model;
+    if (is_generalized_departure_pair(f1, f2)) {
+        return generalized_departure();
+    }
+    const auto& table = departure_specific_table();
+    auto it = table.find({f1, f2});
+    if (it != table.end()) {
+        return it->second;
+    }
+    auto rit = table.find({f2, f1});
+    if (rit != table.end()) {
+        return rit->second;
+    }
+    throw ValueError(format("Unable to obtain GERG departure coefficients for the pair [%s, %s]", f1.c_str(), f2.c_str()));
+}
+
+std::size_t departure_Npower(const DepartureCoeffs& dc) {
+    std::size_t np = 0;
+    while (np < dc.n.size() && dc.eta[np] == 0.0 && dc.beta[np] == 0.0) {
+        ++np;
+    }
+    // CoolProp's GERG2008DepartureFunction assumes the polynomial block is a
+    // contiguous prefix.  If any later term is also polynomial, that
+    // assumption is violated and the split would silently drop terms.
+    for (std::size_t k = np; k < dc.n.size(); ++k) {
+        if (dc.eta[k] == 0.0 && dc.beta[k] == 0.0) {
+            throw ValueError("GERG departure coefficients: polynomial terms are not a contiguous prefix");
+        }
+    }
+    return np;
 }
 
 }  // namespace GERG

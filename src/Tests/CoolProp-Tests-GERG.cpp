@@ -346,4 +346,59 @@ TEST_CASE("GERG reducing parameter lookup rejects unknown fluids", "[GERG]") {
     CHECK_THROWS_AS(get_betasgammas(GERGModel::GERG_2004, "NOT A FLUID", "water"), CoolProp::ValueError);
 }
 
+TEST_CASE("GERG has departure functions for exactly the published pairs", "[GERG]") {
+    const auto& names = component_names(GERGModel::GERG_2008);
+    std::size_t with_departure = 0, with_scaled_F = 0;
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        for (std::size_t j = i + 1; j < names.size(); ++j) {
+            double F = 0;
+            if (get_Fij(GERGModel::GERG_2008, names[i], names[j], F)) {
+                ++with_departure;
+                if (F != 1.0) ++with_scaled_F;
+                CAPTURE(names[i], names[j]);
+                CHECK_NOTHROW(get_departurecoeffs(GERGModel::GERG_2008, names[i], names[j]));
+            } else {
+                CHECK_THROWS_AS(get_departurecoeffs(GERGModel::GERG_2008, names[i], names[j]), CoolProp::ValueError);
+            }
+        }
+    }
+    // Table A3.6: 15 pairs carry a departure function; 7 of them use the
+    // generalised departure function scaled by F_ij != 1.
+    CHECK(with_departure == 15);
+    CHECK(with_scaled_F == 7);
+}
+
+TEST_CASE("GERG F_ij is symmetric", "[GERG]") {
+    double a = 0, b = 0;
+    REQUIRE(get_Fij(GERGModel::GERG_2008, "methane", "isobutane", a));
+    REQUIRE(get_Fij(GERGModel::GERG_2008, "isobutane", "methane", b));
+    CHECK_THAT(a, Catch::Matchers::WithinRel(b, 1e-14));
+    CHECK_THAT(a, Catch::Matchers::WithinRel(0.771035405688, 1e-12));
+}
+
+TEST_CASE("GERG departure coefficients are internally consistent", "[GERG]") {
+    auto dc = get_departurecoeffs(GERGModel::GERG_2008, "methane", "nitrogen");
+    REQUIRE(dc.n.size() > 0);
+    CHECK(dc.t.size() == dc.n.size());
+    CHECK(dc.d.size() == dc.n.size());
+    CHECK(dc.eta.size() == dc.n.size());
+    CHECK(dc.beta.size() == dc.n.size());
+    CHECK(dc.gamma.size() == dc.n.size());
+    CHECK(dc.epsilon.size() == dc.n.size());
+
+    // The polynomial block comes first and is contiguous.
+    std::size_t np = departure_Npower(dc);
+    for (std::size_t k = 0; k < np; ++k) {
+        CHECK(dc.eta[k] == 0.0);
+        CHECK(dc.beta[k] == 0.0);
+    }
+    for (std::size_t k = np; k < dc.n.size(); ++k) {
+        CHECK((dc.eta[k] != 0.0 || dc.beta[k] != 0.0));
+    }
+}
+
+TEST_CASE("GERG-2004 and GERG-2008 share departure data", "[GERG]") {
+    CHECK(get_departurecoeffs(GERGModel::GERG_2004, "methane", "nitrogen").n == get_departurecoeffs(GERGModel::GERG_2008, "methane", "nitrogen").n);
+}
+
 #endif /* ENABLE_CATCH */

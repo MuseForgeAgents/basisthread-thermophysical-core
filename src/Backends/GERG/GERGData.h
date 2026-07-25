@@ -265,6 +265,55 @@ AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name);
 /// ValueError if the pair is not found in either order.
 BetasGammas get_betasgammas(GERGModel model, const std::string& f1, const std::string& f2);
 
+/// Departure-function coefficients for one pair of components (GERG-2004
+/// monograph Table A3.6 and the "generalized" departure function it defines).
+/// Field names match CoolProp's GERG2008DepartureFunction constructor
+/// (src/Backends/Helmholtz/ExcessHEFunction.h:108), which takes
+/// (n, d, t, eta, epsilon, beta, gamma, Npower) -- Task 9 passes these fields
+/// by name in that order, so the struct's OWN field order below does not
+/// matter, only the names do.
+struct DepartureCoeffs
+{
+    std::vector<double> n, t, d, eta, beta, gamma, epsilon;
+};
+
+/// GERG-2004 monograph Table A3.6.  Fewer than half of all component pairs
+/// have a departure function at all; most pairs use the corresponding-states
+/// term alone.  Returns false (and leaves F untouched) when the pair has no
+/// departure function, mirroring teqp's `ok_missing = true` path
+/// (GERG.hpp:768-802) without requiring <optional> in this header.
+///
+/// GERG-2008 reuses GERG-2004's F_ij unchanged (teqp GERG.hpp:1000,
+/// `using GERG2004::get_Fij;`), so there is one shared table for both models
+/// and the model argument is accepted only for interface symmetry with the
+/// other accessors in this header.
+///
+/// F_ij is SYMMETRIC: F_ij == F_ji exactly, unlike the betas/gammas above --
+/// do not reciprocate anything on a reversed-order lookup.
+bool get_Fij(GERGModel model, const std::string& f1, const std::string& f2, double& F);
+
+/// GERG-2004 monograph Table A3.6 departure-function coefficients: the 7
+/// pairs with fluid-pair-specific coefficients, plus the "generalized"
+/// departure function (shared, scaled per-pair by get_Fij) used by 8 more
+/// pairs.  15 pairs total carry a departure function; every other pair
+/// throws ValueError.
+///
+/// GERG-2008 reuses GERG-2004's departure coefficients unchanged (teqp
+/// GERG.hpp:1001, `using GERG2004::get_departurecoeffs;`), so there is one
+/// shared table for both models; the model argument exists only for
+/// interface symmetry.
+DepartureCoeffs get_departurecoeffs(GERGModel model, const std::string& f1, const std::string& f2);
+
+/// Number of leading terms in dc.n (etc.) with eta == 0 and beta == 0 -- the
+/// polynomial block that CoolProp's GERG2008DepartureFunction constructor
+/// (ExcessHEFunction.h:108) expects as a contiguous prefix, with every
+/// remaining term forming the trailing Gaussian block.  Throws ValueError if
+/// a term AFTER that leading run is also polynomial (eta == 0 && beta == 0):
+/// CoolProp's constructor cannot represent a non-contiguous split, and doing
+/// so silently would push Gaussian terms into the polynomial block with no
+/// error anywhere.
+std::size_t departure_Npower(const DepartureCoeffs& dc);
+
 }  // namespace GERG
 }  // namespace CoolProp
 #endif /* GERGDATA_H_ */
