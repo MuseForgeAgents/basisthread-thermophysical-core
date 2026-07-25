@@ -181,6 +181,273 @@ const std::map<std::string, std::vector<double>>& n_main_2008_overrides() {
     return data;
 }
 
+// Binary reducing-parameter tables (betaV, gammaV, betaT, gammaT).
+//
+// Transcribed from teqp (https://github.com/usnistgov/teqp),
+// include/teqp/models/GERG/GERG.hpp: GERG2004::get_betasgammas (lines
+// 595-766) and GERG2008::get_betasgammas (lines 1003-1103).  teqp keys these
+// tables on std::pair<std::string,std::string> hashed with boost::hash; this
+// backend uses std::map on the same pair type instead so as not to take a
+// Boost dependency for a lookup table -- std::map orders pairs natively.
+//
+// Each row is stored EXACTLY ONCE, in the order teqp lists it.  The public
+// accessor get_betasgammas() (below, outside this anonymous namespace) looks
+// up (f1,f2) and, failing that, (f2,f1) with betaV/betaT reciprocated.
+
+using BIPKey = std::pair<std::string, std::string>;
+
+/// Table A3.8, GERG-2004 monograph.  153 pairs: every pair of the 18
+/// GERG-2004 components, none missing, none extra.  teqp GERG.hpp:598-752.
+const std::map<BIPKey, BetasGammas>& betasgammas_2004() {
+    static const std::map<BIPKey, BetasGammas> data = {
+      {{"methane", "nitrogen"}, {0.998721377, 1.013950311, 0.998098830, 0.979273013}},
+      {{"methane", "carbondioxide"}, {0.999518072, 1.002806594, 1.022624490, 0.975665369}},
+      {{"methane", "ethane"}, {0.997547866, 1.006617867, 0.996336508, 1.049707697}},
+      {{"methane", "propane"}, {1.004827070, 1.038470657, 0.989680305, 1.098655531}},
+      {{"methane", "n-butane"}, {0.979105972, 1.045375122, 0.994174910, 1.171607691}},
+      {{"methane", "isobutane"}, {1.011240388, 1.054319053, 0.980315756, 1.161117729}},
+      {{"methane", "n-pentane"}, {0.948330120, 1.124508039, 0.992127525, 1.249173968}},
+      {{"methane", "isopentane"}, {1.000000000, 1.343685343, 1.000000000, 1.188899743}},
+      {{"methane", "n-hexane"}, {0.958015294, 1.052643846, 0.981844797, 1.330570181}},
+      {{"methane", "n-heptane"}, {0.962050831, 1.156655935, 0.977431529, 1.379850328}},
+      {{"methane", "n-octane"}, {0.994740603, 1.116549372, 0.957473785, 1.449245409}},
+      {{"methane", "hydrogen"}, {1.000000000, 1.018702573, 1.000000000, 1.352643115}},
+      {{"methane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 0.950000000}},
+      {{"methane", "carbonmonoxide"}, {0.997340772, 1.006102927, 0.987411732, 0.987473033}},
+      {{"methane", "water"}, {1.012783169, 1.585018334, 1.063333913, 0.775810513}},
+      {{"methane", "helium"}, {1.000000000, 0.881405683, 1.000000000, 3.159776855}},
+      {{"methane", "argon"}, {1.034630259, 1.014678542, 0.990954281, 0.989843388}},
+      {{"nitrogen", "carbondioxide"}, {0.977794634, 1.047578256, 1.005894529, 1.107654104}},
+      {{"nitrogen", "ethane"}, {0.978880168, 1.042352891, 1.007671428, 1.098650964}},
+      {{"nitrogen", "propane"}, {0.974424681, 1.081025408, 1.002677329, 1.201264026}},
+      {{"nitrogen", "n-butane"}, {0.996082610, 1.146949309, 0.994515234, 1.304886838}},
+      {{"nitrogen", "isobutane"}, {0.986415830, 1.100576129, 0.992868130, 1.284462634}},
+      {{"nitrogen", "n-pentane"}, {1.000000000, 1.078877166, 1.000000000, 1.419029041}},
+      {{"nitrogen", "isopentane"}, {1.000000000, 1.154135439, 1.000000000, 1.381770770}},
+      {{"nitrogen", "n-hexane"}, {1.000000000, 1.195952177, 1.000000000, 1.472607971}},
+      {{"nitrogen", "n-heptane"}, {1.000000000, 1.404554090, 1.000000000, 1.520975334}},
+      {{"nitrogen", "n-octane"}, {1.000000000, 1.186067025, 1.000000000, 1.733280051}},
+      {{"nitrogen", "hydrogen"}, {0.972532065, 0.970115357, 0.946134337, 1.175696583}},
+      {{"nitrogen", "oxygen"}, {0.999521770, 0.997082328, 0.997190589, 0.995157044}},
+      {{"nitrogen", "carbonmonoxide"}, {1.000000000, 1.008690943, 1.000000000, 0.993425388}},
+      {{"nitrogen", "water"}, {1.000000000, 1.094749685, 1.000000000, 0.968808467}},
+      {{"nitrogen", "helium"}, {0.969501055, 0.932629867, 0.692868765, 1.471831580}},
+      {{"nitrogen", "argon"}, {1.004166412, 1.002212182, 0.999069843, 0.990034831}},
+      {{"carbondioxide", "ethane"}, {1.002525718, 1.032876701, 1.013871147, 0.900949530}},
+      {{"carbondioxide", "propane"}, {0.996898004, 1.047596298, 1.033620538, 0.908772477}},
+      {{"carbondioxide", "n-butane"}, {1.174760923, 1.222437324, 1.018171004, 0.911498231}},
+      {{"carbondioxide", "isobutane"}, {1.076551882, 1.081909003, 1.023339824, 0.929982936}},
+      {{"carbondioxide", "n-pentane"}, {1.024311498, 1.068406078, 1.027000795, 0.979217302}},
+      {{"carbondioxide", "isopentane"}, {1.060793104, 1.116793198, 1.019180957, 0.961218039}},
+      {{"carbondioxide", "n-hexane"}, {1.000000000, 0.851343711, 1.000000000, 1.038675574}},
+      {{"carbondioxide", "n-heptane"}, {1.205469976, 1.164585914, 1.011806317, 1.046169823}},
+      {{"carbondioxide", "n-octane"}, {1.026169373, 1.104043935, 1.029690780, 1.074455386}},
+      {{"carbondioxide", "hydrogen"}, {0.904142159, 1.152792550, 0.942320195, 1.782924792}},
+      {{"carbondioxide", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"carbondioxide", "carbonmonoxide"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"carbondioxide", "water"}, {0.949055959, 1.542328793, 0.997372205, 0.775453996}},
+      {{"carbondioxide", "helium"}, {0.846647561, 0.864141549, 0.768377630, 3.207456948}},
+      {{"carbondioxide", "argon"}, {1.008392428, 1.029205465, 0.996512863, 1.050971635}},
+      {{"ethane", "propane"}, {0.997607277, 1.003034720, 0.996199694, 1.014730190}},
+      {{"ethane", "n-butane"}, {0.999157205, 1.006179146, 0.999130554, 1.034832749}},
+      {{"ethane", "isobutane"}, {1.000000000, 1.006616886, 1.000000000, 1.033283811}},
+      {{"ethane", "n-pentane"}, {0.993851009, 1.026085655, 0.998688946, 1.066665676}},
+      {{"ethane", "isopentane"}, {1.000000000, 1.045439246, 1.000000000, 1.021150247}},
+      {{"ethane", "n-hexane"}, {1.000000000, 1.169701102, 1.000000000, 1.092177796}},
+      {{"ethane", "n-heptane"}, {1.000000000, 1.057666085, 1.000000000, 1.134532014}},
+      {{"ethane", "n-octane"}, {1.007469726, 1.071917985, 0.984068272, 1.168636194}},
+      {{"ethane", "hydrogen"}, {0.925367171, 1.106072040, 0.932969831, 1.902008495}},
+      {{"ethane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"ethane", "carbonmonoxide"}, {1.000000000, 1.201417898, 1.000000000, 1.069224728}},
+      {{"ethane", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"ethane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"ethane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"propane", "n-butane"}, {0.999795868, 1.003264179, 1.000310289, 1.007392782}},
+      {{"propane", "isobutane"}, {0.999243146, 1.001156119, 0.998012298, 1.005250774}},
+      {{"propane", "n-pentane"}, {1.044919431, 1.019921513, 0.996484021, 1.008344412}},
+      {{"propane", "isopentane"}, {1.040459289, 0.999432118, 0.994364425, 1.003269500}},
+      {{"propane", "n-hexane"}, {1.000000000, 1.057872566, 1.000000000, 1.025657518}},
+      {{"propane", "n-heptane"}, {1.000000000, 1.079648053, 1.000000000, 1.050044169}},
+      {{"propane", "n-octane"}, {1.000000000, 1.102764612, 1.000000000, 1.063694129}},
+      {{"propane", "hydrogen"}, {1.000000000, 1.074006110, 1.000000000, 2.308215191}},
+      {{"propane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"propane", "carbonmonoxide"}, {1.000000000, 1.108143673, 1.000000000, 1.197564208}},
+      {{"propane", "water"}, {1.000000000, 1.011759763, 1.000000000, 0.600340961}},
+      {{"propane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"propane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-butane", "isobutane"}, {1.000880464, 1.000414440, 1.000077547, 1.001432824}},
+      {{"n-butane", "n-pentane"}, {1.000000000, 1.018159650, 1.000000000, 1.002143640}},
+      {{"n-butane", "isopentane"}, {1.000000000, 1.002728262, 1.000000000, 1.000792201}},
+      {{"n-butane", "n-hexane"}, {1.000000000, 1.034995284, 1.000000000, 1.009157060}},
+      {{"n-butane", "n-heptane"}, {1.000000000, 1.019174227, 1.000000000, 1.021283378}},
+      {{"n-butane", "n-octane"}, {1.000000000, 1.046905515, 1.000000000, 1.033180106}},
+      {{"n-butane", "hydrogen"}, {1.000000000, 1.232939523, 1.000000000, 2.509259945}},
+      {{"n-butane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-butane", "carbonmonoxide"}, {1.000000000, 1.084740904, 1.000000000, 1.174055065}},
+      {{"n-butane", "water"}, {1.000000000, 1.223638763, 1.000000000, 0.615512682}},
+      {{"n-butane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-butane", "argon"}, {1.000000000, 1.214638734, 1.000000000, 1.245039498}},
+      {{"isobutane", "n-pentane"}, {1.000000000, 1.002779804, 1.000000000, 1.002495889}},
+      {{"isobutane", "isopentane"}, {1.000000000, 1.002284197, 1.000000000, 1.001835788}},
+      {{"isobutane", "n-hexane"}, {1.000000000, 1.010493989, 1.000000000, 1.006018054}},
+      {{"isobutane", "n-heptane"}, {1.000000000, 1.021668316, 1.000000000, 1.009885760}},
+      {{"isobutane", "n-octane"}, {1.000000000, 1.032807063, 1.000000000, 1.013945424}},
+      {{"isobutane", "hydrogen"}, {1.000000000, 1.147595688, 1.000000000, 1.895305393}},
+      {{"isobutane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isobutane", "carbonmonoxide"}, {1.000000000, 1.087272232, 1.000000000, 1.161523504}},
+      {{"isobutane", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isobutane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isobutane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-pentane", "isopentane"}, {1.000000000, 1.000024352, 1.000000000, 1.000050537}},
+      {{"n-pentane", "n-hexane"}, {1.000000000, 1.002480637, 1.000000000, 1.000761237}},
+      {{"n-pentane", "n-heptane"}, {1.000000000, 1.008972412, 1.000000000, 1.002441051}},
+      {{"n-pentane", "n-octane"}, {1.000000000, 1.069223964, 1.000000000, 1.016422347}},
+      {{"n-pentane", "hydrogen"}, {1.000000000, 1.188334783, 1.000000000, 2.013859174}},
+      {{"n-pentane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-pentane", "carbonmonoxide"}, {1.000000000, 1.119954454, 1.000000000, 1.206195595}},
+      {{"n-pentane", "water"}, {1.000000000, 0.956677310, 1.000000000, 0.447666011}},
+      {{"n-pentane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-pentane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isopentane", "n-hexane"}, {1.000000000, 1.002996055, 1.000000000, 1.001204174}},
+      {{"isopentane", "n-heptane"}, {1.000000000, 1.009928531, 1.000000000, 1.003194615}},
+      {{"isopentane", "n-octane"}, {1.000000000, 1.017880981, 1.000000000, 1.005647480}},
+      {{"isopentane", "hydrogen"}, {1.000000000, 1.184339122, 1.000000000, 1.996386669}},
+      {{"isopentane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isopentane", "carbonmonoxide"}, {1.000000000, 1.116693501, 1.000000000, 1.199475627}},
+      {{"isopentane", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isopentane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"isopentane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-hexane", "n-heptane"}, {1.000000000, 1.001508227, 1.000000000, 0.999762786}},
+      {{"n-hexane", "n-octane"}, {1.000000000, 1.006268954, 1.000000000, 1.001633952}},
+      {{"n-hexane", "hydrogen"}, {1.000000000, 1.243461678, 1.000000000, 3.021197546}},
+      {{"n-hexane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-hexane", "carbonmonoxide"}, {1.000000000, 1.155145836, 1.000000000, 1.233435828}},
+      {{"n-hexane", "water"}, {1.000000000, 1.170217596, 1.000000000, 0.569681333}},
+      {{"n-hexane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-hexane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-heptane", "n-octane"}, {1.000000000, 1.006767176, 1.000000000, 0.998793111}},
+      {{"n-heptane", "hydrogen"}, {1.000000000, 1.159131722, 1.000000000, 3.169143057}},
+      {{"n-heptane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-heptane", "carbonmonoxide"}, {1.000000000, 1.190354273, 1.000000000, 1.256295219}},
+      {{"n-heptane", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-heptane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-heptane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-octane", "hydrogen"}, {1.000000000, 1.305249405, 1.000000000, 2.191555216}},
+      {{"n-octane", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-octane", "carbonmonoxide"}, {1.000000000, 1.219206702, 1.000000000, 1.276744779}},
+      {{"n-octane", "water"}, {1.000000000, 0.599484191, 1.000000000, 0.662072469}},
+      {{"n-octane", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"n-octane", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"hydrogen", "oxygen"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"hydrogen", "carbonmonoxide"}, {1.000000000, 1.121416201, 1.000000000, 1.377504607}},
+      {{"hydrogen", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"hydrogen", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"hydrogen", "argon"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"oxygen", "carbonmonoxide"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"oxygen", "water"}, {1.000000000, 1.143174289, 1.000000000, 0.964767932}},
+      {{"oxygen", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"oxygen", "argon"}, {0.999746847, 0.993907223, 1.000023103, 0.990430423}},
+      {{"carbonmonoxide", "water"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"carbonmonoxide", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"carbonmonoxide", "argon"}, {1.000000000, 1.159720623, 1.000000000, 0.954215746}},
+      {{"water", "helium"}, {1.000000000, 1.000000000, 1.000000000, 1.000000000}},
+      {{"water", "argon"}, {1.000000000, 1.038993495, 1.000000000, 1.070941866}},
+      {{"helium", "argon"}, {1.00000000, 1.00000000, 1.00000000, 1.00000000}},
+    };
+    return data;
+}
+
+/// Table A8, GERG-2008 manuscript.  Pairs unchanged from GERG-2004 are left
+/// out and fall through to betasgammas_2004().  72 pairs: 15 that GERG-2008
+/// revises (the EOS changed for isopentane and CO, so their estimated
+/// interaction parameters were recalculated with the "new" Tc) plus 57 new
+/// pairs involving the three fluids GERG-2008 adds (hydrogen sulfide,
+/// n-nonane, n-decane: 3 new x 18 old + 3 pairs among the new three).  teqp
+/// GERG.hpp:1008-1088.
+const std::map<BIPKey, BetasGammas>& betasgammas_2008_overrides() {
+    static const std::map<BIPKey, BetasGammas> data = {
+      // This set has different values than in GERG-2004. The change
+      // occurs because the EOS has changed for isopentane and CO and thus
+      // the estimated interaction parameters need to be calculated with
+      // the "new" Tc.
+      {{"ethane", "isopentane"}, {1.0, 1.045439935, 1.0, 1.021150247}},
+      {{"n-butane", "carbonmonoxide"}, {1.0, 1.084740904, 1.0, 1.173916162}},
+      {{"n-butane", "isopentane"}, {1.0, 1.002728434, 1.0, 1.000792201}},
+      {{"isobutane", "carbonmonoxide"}, {1.0, 1.087272232, 1.0, 1.161390082}},
+      {{"isobutane", "isopentane"}, {1.0, 1.002284353, 1.0, 1.001835788}},
+      {{"n-pentane", "carbonmonoxide"}, {1.0, 1.119954454, 1.0, 1.206043295}},
+      {{"isopentane", "carbonmonoxide"}, {1.0, 1.116694577, 1.0, 1.199326059}},
+      {{"n-hexane", "carbonmonoxide"}, {1.0, 1.155145836, 1.0, 1.233272781}},
+      {{"n-heptane", "carbonmonoxide"}, {1.0, 1.190354273, 1.0, 1.256123503}},
+      {{"n-octane", "carbonmonoxide"}, {1.0, 1.219206702, 1.0, 1.276565536}},
+      {{"n-pentane", "isopentane"}, {1.0, 1.000024335, 1.0, 1.000050537}},
+      {{"isopentane", "n-hexane"}, {1.0, 1.002995876, 1.0, 1.001204174}},
+      {{"isopentane", "n-heptane"}, {1.0, 1.009928206, 1.0, 1.003194615}},
+      {{"isopentane", "n-octane"}, {1.0, 1.017880545, 1.0, 1.00564748}},
+      {{"isopentane", "hydrogen"}, {1.0, 1.184340443, 1.0, 1.996386669}},
+
+      // The 57 new pairs added in GERG-2008.
+      {{"methane", "n-nonane"}, {1.002852287, 1.141895355, 0.947716769, 1.528532478}},
+      {{"methane", "n-decane"}, {1.033086292, 1.146089637, 0.937777823, 1.568231489}},
+      {{"methane", "hydrogensulfide"}, {1.012599087, 1.040161207, 1.011090031, 0.961155729}},
+      {{"nitrogen", "n-nonane"}, {1.0, 1.100405929, 0.95637945, 1.749119996}},
+      {{"nitrogen", "n-decane"}, {1.0, 1.0, 0.957934447, 1.822157123}},
+      {{"nitrogen", "hydrogensulfide"}, {0.910394249, 1.256844157, 1.004692366, 0.9601742}},
+      {{"carbondioxide", "n-nonane"}, {1.0, 0.973386152, 1.00768862, 1.140671202}},
+      {{"carbondioxide", "n-decane"}, {1.000151132, 1.183394668, 1.02002879, 1.145512213}},
+      {{"carbondioxide", "hydrogensulfide"}, {0.906630564, 1.024085837, 1.016034583, 0.92601888}},
+      {{"ethane", "n-nonane"}, {1.0, 1.14353473, 1.0, 1.05603303}},
+      {{"ethane", "n-decane"}, {0.995676258, 1.098361281, 0.970918061, 1.237191558}},
+      {{"ethane", "hydrogensulfide"}, {1.010817909, 1.030988277, 0.990197354, 0.90273666}},
+      {{"propane", "n-nonane"}, {1.0, 1.199769134, 1.0, 1.109973833}},
+      {{"propane", "n-decane"}, {0.984104227, 1.053040574, 0.985331233, 1.140905252}},
+      {{"propane", "hydrogensulfide"}, {0.936811219, 1.010593999, 0.992573556, 0.905829247}},
+      {{"n-butane", "n-nonane"}, {1.0, 1.049219137, 1.0, 1.014096448}},
+      {{"n-butane", "n-decane"}, {0.976951968, 1.027845529, 0.993688386, 1.076466918}},
+      {{"n-butane", "hydrogensulfide"}, {0.908113163, 1.033366041, 0.985962886, 0.926156602}},
+      {{"isobutane", "n-nonane"}, {1.0, 1.047298475, 1.0, 1.017817492}},
+      {{"isobutane", "n-decane"}, {1.0, 1.060243344, 1.0, 1.021624748}},
+      {{"isobutane", "hydrogensulfide"}, {1.012994431, 0.988591117, 0.974550548, 0.937130844}},
+      {{"n-pentane", "n-nonane"}, {1.0, 1.034910633, 1.0, 1.103421755}},
+      {{"n-pentane", "n-decane"}, {1.0, 1.016370338, 1.0, 1.049035838}},
+      {{"n-pentane", "hydrogensulfide"}, {0.984613203, 1.076539234, 0.962006651, 0.959065662}},
+      {{"isopentane", "n-nonane"}, {1.0, 1.028994325, 1.0, 1.008191499}},
+      {{"isopentane", "n-decane"}, {1.0, 1.039372957, 1.0, 1.010825138}},
+      {{"isopentane", "hydrogensulfide"}, {1.0, 0.835763343, 1.0, 0.982651529}},
+      {{"n-hexane", "n-nonane"}, {1.0, 1.02076168, 1.0, 1.055369591}},
+      {{"n-hexane", "n-decane"}, {1.001516371, 1.013511439, 0.99764101, 1.028939539}},
+      {{"n-hexane", "hydrogensulfide"}, {0.754473958, 1.339283552, 0.985891113, 0.956075596}},
+      {{"n-heptane", "n-nonane"}, {1.0, 1.001370076, 1.0, 1.001150096}},
+      {{"n-heptane", "n-decane"}, {1.0, 1.002972346, 1.0, 1.002229938}},
+      {{"n-heptane", "hydrogensulfide"}, {0.828967164, 1.087956749, 0.988937417, 1.013453092}},
+      {{"n-octane", "n-nonane"}, {1.0, 1.001357085, 1.0, 1.000235044}},
+      {{"n-octane", "n-decane"}, {1.0, 1.002553544, 1.0, 1.007186267}},
+      {{"n-octane", "hydrogensulfide"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-nonane", "n-decane"}, {1.0, 1.00081052, 1.0, 1.000182392}},
+      {{"n-nonane", "hydrogen"}, {1.0, 1.342647661, 1.0, 2.23435404}},
+      {{"n-nonane", "oxygen"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-nonane", "carbonmonoxide"}, {1.0, 1.252151449, 1.0, 1.294070556}},
+      {{"n-nonane", "water"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-nonane", "hydrogensulfide"}, {1.0, 1.082905109, 1.0, 1.086557826}},
+      {{"n-nonane", "helium"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-nonane", "argon"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-decane", "hydrogen"}, {1.695358382, 1.120233729, 1.064818089, 3.786003724}},
+      {{"n-decane", "oxygen"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-decane", "carbonmonoxide"}, {1.0, 0.87018496, 1.049594632, 1.803567587}},
+      {{"n-decane", "water"}, {1.0, 0.551405318, 0.897162268, 0.740416402}},
+      {{"n-decane", "hydrogensulfide"}, {0.975187766, 1.171714677, 0.973091413, 1.103693489}},
+      {{"n-decane", "helium"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"n-decane", "argon"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"hydrogen", "hydrogensulfide"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"oxygen", "hydrogensulfide"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"carbonmonoxide", "hydrogensulfide"}, {0.795660392, 1.101731308, 1.025536736, 1.022749748}},
+      {{"water", "hydrogensulfide"}, {1.0, 1.014832832, 1.0, 0.940587083}},
+      {{"hydrogensulfide", "helium"}, {1.0, 1.0, 1.0, 1.0}},
+      {{"hydrogensulfide", "argon"}, {1.0, 1.0, 1.0, 1.0}},
+    };
+    return data;
+}
+
 // Ideal-gas coefficient tables, GERG-2004 monograph Table A3.1.
 //
 // Stored exactly as teqp stores them: {n0[1..7], theta0[4..7]}, i.e. 7 n and
@@ -403,6 +670,37 @@ std::string resolve_component(GERGModel model, const std::string& user_name) {
         throw ValueError(format("[%s] is a GERG-2008 component but not a GERG-2004 component", user_name.c_str()));
     }
     return gerg_name;
+}
+
+BetasGammas get_betasgammas(GERGModel model, const std::string& f1, const std::string& f2) {
+    if (model == GERGModel::GERG_2008) {
+        const auto& overrides = betasgammas_2008_overrides();
+        auto it = overrides.find({f1, f2});
+        if (it != overrides.end()) {
+            return it->second;
+        }
+        auto rit = overrides.find({f2, f1});
+        if (rit != overrides.end()) {
+            BetasGammas bg = rit->second;
+            bg.betaV = 1.0 / bg.betaV;
+            bg.betaT = 1.0 / bg.betaT;
+            return bg;
+        }
+    }
+    // Fall through to GERG-2004 (also GERG-2004's own lookup path).
+    const auto& base = betasgammas_2004();
+    auto it = base.find({f1, f2});
+    if (it != base.end()) {
+        return it->second;
+    }
+    auto rit = base.find({f2, f1});
+    if (rit != base.end()) {
+        BetasGammas bg = rit->second;
+        bg.betaV = 1.0 / bg.betaV;
+        bg.betaT = 1.0 / bg.betaT;
+        return bg;
+    }
+    throw ValueError(format("Unable to obtain GERG binary reducing parameters for the pair [%s, %s]", f1.c_str(), f2.c_str()));
 }
 
 }  // namespace GERG

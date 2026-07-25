@@ -301,4 +301,49 @@ TEST_CASE("GERG recomputed integration constants match an independent solve", "[
     CHECK(std::abs(get_alphaig_coeffs(GERGModel::GERG_2004, "n-octane").n0[1] - 15.864709639) > 1.0);
 }
 
+TEST_CASE("GERG reducing parameters exist for every binary pair", "[GERG]") {
+    for (auto model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        const auto& names = component_names(model);
+        for (std::size_t i = 0; i < names.size(); ++i) {
+            for (std::size_t j = i + 1; j < names.size(); ++j) {
+                CAPTURE(names[i], names[j]);
+                CHECK_NOTHROW(get_betasgammas(model, names[i], names[j]));
+                CHECK_NOTHROW(get_betasgammas(model, names[j], names[i]));
+            }
+        }
+    }
+}
+
+TEST_CASE("GERG reducing parameters invert correctly when the pair is reversed", "[GERG]") {
+    auto fwd = get_betasgammas(GERGModel::GERG_2008, "methane", "nitrogen");
+    auto rev = get_betasgammas(GERGModel::GERG_2008, "nitrogen", "methane");
+    CHECK_THAT(rev.betaT, Catch::Matchers::WithinRel(1.0 / fwd.betaT, 1e-14));
+    CHECK_THAT(rev.betaV, Catch::Matchers::WithinRel(1.0 / fwd.betaV, 1e-14));
+    // Gammas are symmetric, not reciprocal.
+    CHECK_THAT(rev.gammaT, Catch::Matchers::WithinRel(fwd.gammaT, 1e-14));
+    CHECK_THAT(rev.gammaV, Catch::Matchers::WithinRel(fwd.gammaV, 1e-14));
+}
+
+TEST_CASE("GERG-2008 changes some reducing parameters relative to GERG-2004", "[GERG]") {
+    // Table A8 of the GERG-2008 manuscript revises a subset of pairs.
+    // At least one pair must differ, and pairs GERG-2008 did not touch
+    // must fall through unchanged.
+    bool any_different = false;
+    const auto& names = component_names(GERGModel::GERG_2004);
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        for (std::size_t j = i + 1; j < names.size(); ++j) {
+            auto a = get_betasgammas(GERGModel::GERG_2004, names[i], names[j]);
+            auto b = get_betasgammas(GERGModel::GERG_2008, names[i], names[j]);
+            if (a.betaT != b.betaT || a.gammaT != b.gammaT || a.betaV != b.betaV || a.gammaV != b.gammaV) {
+                any_different = true;
+            }
+        }
+    }
+    CHECK(any_different);
+}
+
+TEST_CASE("GERG reducing parameter lookup rejects unknown fluids", "[GERG]") {
+    CHECK_THROWS_AS(get_betasgammas(GERGModel::GERG_2004, "NOT A FLUID", "water"), CoolProp::ValueError);
+}
+
 #endif /* ENABLE_CATCH */

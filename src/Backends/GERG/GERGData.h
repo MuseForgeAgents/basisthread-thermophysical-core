@@ -100,6 +100,16 @@ struct AlphaigCoeffs
     std::vector<double> n0, theta0;
 };
 
+/// Binary reducing-parameter coefficients for one pair of components.
+/// Field order matches teqp's struct EXACTLY (betaV, gammaV, betaT, gammaT --
+/// note V before T) so that brace-initialised rows copied from teqp GERG.hpp
+/// land in the right fields; reordering these compiles fine and silently
+/// corrupts every mixture.
+struct BetasGammas
+{
+    double betaV, gammaV, betaT, gammaT;
+};
+
 namespace detail {
 
 /// Table A3.5, GERG-2004 monograph.  Tabulated in mol/dm^3, K, kg/kmol;
@@ -239,6 +249,21 @@ std::pair<double, double> recalc_integration_constants(const AlphaigCoeffs& c, d
 /// while h and s were quietly wrong.  Throws ValueError if gerg_name is not a
 /// component of the given model.
 AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name);
+
+/// Binary reducing-parameter beta/gamma values (GERG-2004 monograph Table
+/// A3.8; GERG-2008 manuscript Table A8 overrides 15 of those pairs and adds
+/// 57 new ones for the three fluids introduced in GERG-2008).  Defined in
+/// GERGBackend.cpp: this is the largest data block in the backend, and
+/// keeping it out of line keeps this header's compile time down.
+///
+/// ORIENTATION (load-bearing for Task 9): the underlying table stores each
+/// pair once, in one order.  This accessor returns values oriented for the
+/// (f1, f2) order GIVEN, not the order stored.  If the stored row is for
+/// (f2, f1), betaV and betaT are returned RECIPROCATED (1/betaV, 1/betaT);
+/// gammaV and gammaT are symmetric between the two orderings and are
+/// returned unchanged.  This mirrors teqp GERG.hpp:757-763 exactly.  Throws
+/// ValueError if the pair is not found in either order.
+BetasGammas get_betasgammas(GERGModel model, const std::string& f1, const std::string& f2);
 
 }  // namespace GERG
 }  // namespace CoolProp
