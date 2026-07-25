@@ -14,6 +14,7 @@
 // not be included from include/CoolProp/.
 
 #include <algorithm>
+#include <cstdint>
 #include <map>
 #include <string>
 #include <vector>
@@ -25,7 +26,7 @@ namespace CoolProp {
 namespace GERG {
 
 /// Which GERG model year this backend instance represents.
-enum class GERGModel
+enum class GERGModel : std::uint8_t
 {
     GERG_2004,
     GERG_2008
@@ -36,6 +37,16 @@ struct PureInfo
     double rhoc_molm3;  ///< Reducing density, mol/m^3
     double Tc_K;        ///< Reducing temperature, K
     double M_kgmol;     ///< Molar mass, kg/mol
+};
+
+/// Pure-fluid residual Helmholtz coefficients: alpha^r = sum_i n_i
+/// delta^{d_i} tau^{t_i} exp(-c_i delta^{l_i}).  c_i is 1.0 exactly when
+/// l_i > 0 and 0.0 otherwise; CoolProp's ResidualHelmholtzGeneralizedExponential
+/// (add_Power, include/CoolProp/fluids/Helmholtz.h) derives c from l the same
+/// way, so c is kept here only for one-to-one comparison against teqp.
+struct PureCoeffs
+{
+    std::vector<double> n, t, d, c, l;
 };
 
 namespace detail {
@@ -148,6 +159,13 @@ inline PureInfo get_pure_info(GERGModel model, const std::string& gerg_name) {
 /// GERGBackend.cpp because it needs get_fluid_param_string(), which would
 /// otherwise pull all of CoolProp.h into this data-only header.
 std::string resolve_component(GERGModel model, const std::string& user_name);
+
+/// Pure-fluid residual coefficients (GERG-2004 monograph Table A3.2 and its
+/// GERG-2008 overrides/additions).  Throws ValueError if gerg_name is not a
+/// component of the given model.  Defined in GERGBackend.cpp: the tables are
+/// the largest data block in this backend, and keeping them out of line
+/// keeps this header's compile time down.
+PureCoeffs get_pure_coeffs(GERGModel model, const std::string& gerg_name);
 
 }  // namespace GERG
 }  // namespace CoolProp
