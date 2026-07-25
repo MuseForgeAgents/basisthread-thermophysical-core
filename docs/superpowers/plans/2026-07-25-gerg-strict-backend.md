@@ -1171,21 +1171,29 @@ def point(year, names, z, T, rho):
     resid, ideal = models(year, names)
     z = np.asarray(z, dtype=float)
 
-    Ar00 = resid.get_Ar00(T, rho, z)
-    Ar01 = resid.get_Ar01(T, rho, z)
-    Ar02 = resid.get_Ar02(T, rho, z)
-    Ar11 = resid.get_Ar11(T, rho, z)
-    Ar20 = resid.get_Ar20(T, rho, z)
+    # teqp's accessor naming is get_Ar<TAU order><DELTA order>.  An earlier
+    # draft of this plan had these indices BACKWARDS, which produced values
+    # that looked plausible and were wrong.  Verified empirically:
+    # get_Ar20 on the ideal-gas model gives -cv_ideal/R (3.303 for methane
+    # at 300 K, which is right), while get_Ar02 gives -1.0.
+    Ar00 = resid.get_Ar00(T, rho, z)   # alpha^r
+    Ar01 = resid.get_Ar01(T, rho, z)   # delta * dalpha^r/ddelta
+    Ar02 = resid.get_Ar02(T, rho, z)   # delta^2 * d2alpha^r/ddelta^2
+    Ar11 = resid.get_Ar11(T, rho, z)   # delta*tau * d2alpha^r/(ddelta dtau)
+    Ar20 = resid.get_Ar20(T, rho, z)   # tau^2 * d2alpha^r/dtau^2
     Aig00 = ideal.get_Ar00(T, rho, z)
-    Aig02 = ideal.get_Ar02(T, rho, z)
+    Aig20 = ideal.get_Ar20(T, rho, z)
 
     p = rho * R * T * (1.0 + Ar01)
-    cv_over_R = -(Aig02 + Ar02)
-    # w^2 = (RT/M) * [1 + 2*Ar01 + Ar20 - (1 + Ar01 - Ar11)^2 / (Aig02 + Ar02)]
+    cv = -(Aig20 + Ar20) * R
     Mmix = float(np.dot(z, [molar_mass(year, n) for n in names]))
-    w2 = (R * T / Mmix) * (1 + 2 * Ar01 + Ar20 - (1 + Ar01 - Ar11) ** 2 / (Aig02 + Ar02))
-    return Ar00, Aig00, p, cv_over_R * R, np.sqrt(w2)
+    w2 = (R * T / Mmix) * (1 + 2 * Ar01 + Ar02 - (1 + Ar01 - Ar11) ** 2 / (Aig20 + Ar20))
+    return Ar00, Aig00, p, cv, np.sqrt(w2)
 ```
+
+These three expressions are verified: against teqp's published validation
+point for gas 2 (T = 190.68 K, D = 11.0 mol/L) they reproduce
+p = 4.62270367011 MPa to 4e-13 relative.
 
 The `molar_mass` helper and the `Ar20` / `Ar11` accessor names must be checked against the installed teqp — the derivative-accessor naming convention is `get_ArXY` where X is the tau order and Y the delta order, and the speed-of-sound grouping above follows teqp's own test (`~/Code/teqp/src/tests/catch_test_GERG.cxx:675-694`). Read that test and mirror its exact expressions rather than re-deriving them; any disagreement between this script and teqp's test is a bug in this script.
 
@@ -1202,6 +1210,31 @@ Mixtures: transcribe the 21-component gas compositions and state points from teq
 `validation_data` (`:322-...`). Note that `validation_data[i].GasNo - 2` indexes
 `mixture_comps`, compositions are in **mole percent** and must be divided by 100,
 and `D_molL` is in mol/L so multiply by 1000 for mol/m^3.
+
+**CRITICAL — the columns of `mixture_comps` are NOT in `GERG2008::component_names`
+order.** They follow the AGA8 ordering, declared separately as `components` at
+`catch_test_GERG.cxx:512`:
+
+```
+{"methane","nitrogen","carbondioxide","ethane","propane","isobutane","n-butane",
+ "isopentane","n-pentane","n-hexane","n-heptane","n-octane","n-nonane","n-decane",
+ "hydrogen","oxygen","carbonmonoxide","water","hydrogensulfide","helium","argon"}
+```
+
+Note isobutane BEFORE n-butane, isopentane BEFORE n-pentane, and helium/argon
+last — all three differ from `component_names`. Build the teqp model with THIS
+vector when evaluating `mixture_comps` rows. Using `component_names` order
+instead silently misassigns every composition: it still sums to 1, still
+evaluates, and gives answers wrong by a few tenths of a percent. Verified: with
+the wrong order gas 2 gives p = 4.6142620561 MPa; with this order it gives
+4.62270367011 MPa, matching the published value to 4e-13.
+
+Also note the precision asymmetry in `validation_data`: its `P_MPa` column is
+full precision, but `cv_JmolK` and `w_ms` agree with teqp only to about 1e-6
+because they were printed from the published AGA8 table. **Generate the
+reference values from teqp directly at full double precision**; use
+`validation_data` for the state points (GasNo, T, D) and treat its P column as
+a cross-check, not as the fixture.
 
 Also emit every binary pair at a single mid-range state
 (`T = 250 K`, `rho = 5000 mol/m^3`, `z = [0.4, 0.6]`) so Task 9 exercises all
