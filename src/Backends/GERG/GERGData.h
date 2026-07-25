@@ -17,6 +17,7 @@
 #include <cstdint>
 #include <map>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "CoolProp/Exceptions.h"
@@ -47,6 +48,41 @@ struct PureInfo
 struct PureCoeffs
 {
     std::vector<double> n, t, d, c, l;
+};
+
+/// The two gas constants that appear in the GERG ideal-gas part.  R* is the
+/// value used when the ideal-gas c_p correlations were fitted; R is the value
+/// the equation of state itself uses.  teqp GERG.hpp:470-471.
+constexpr double R_GERG = 8.314472;      ///< J/mol/K
+constexpr double RSTAR_GERG = 8.314510;  ///< J/mol/K
+
+/// Ideal-gas Helmholtz coefficients, GERG-2004 monograph Table A3.1.
+///
+/// Both vectors have length 8 so that the indices match the monograph:
+/// n0[1..7] and theta0[4..7] are used, the rest are zero padding.
+///
+///   alpha^o_i = ln(rho/rho_c,i)
+///             + (R*/R) * [  n0[1] + n0[2]*Tc/T + n0[3]*ln(Tc/T)
+///                         + n0[4]*ln(|sinh(theta0[4]*Tc/T)|)
+///                         + n0[6]*ln(|sinh(theta0[6]*Tc/T)|)
+///                         - n0[5]*ln(|cosh(theta0[5]*Tc/T)|)
+///                         - n0[7]*ln(|cosh(theta0[7]*Tc/T)|) ]
+///
+/// SIGN CONVENTION (load-bearing for Task 8): every n0 is stored with the
+/// POSITIVE sign as published.  The minus in front of the two cosh terms
+/// lives in the *expression above*, not in the stored coefficient.  That
+/// matches CoolProp's IdealHelmholtzGERG2004Cosh::all (src/Helmholtz.cpp),
+/// which accumulates `-n[i]*log(|cosh(...)|)` and therefore also expects the
+/// published, positive n.  Handing it a negated n0[5]/n0[7] would silently
+/// flip the sign of those contributions to h and s.
+///
+/// UNITS: n0 and theta0 are dimensionless; theta0 multiplies Tc/T.  The
+/// (R*/R) prefactor scales the WHOLE bracket and is NOT folded into the
+/// stored coefficients, so Task 8 must apply it itself (CoolProp's
+/// GERG2004Cosh/GERG2004Sinh terms do not know about it).
+struct AlphaigCoeffs
+{
+    std::vector<double> n0, theta0;
 };
 
 namespace detail {
@@ -164,6 +200,30 @@ std::string resolve_component(GERGModel model, const std::string& user_name);
 /// the largest data block in this backend, and keeping them out of line
 /// keeps this header's compile time down.
 PureCoeffs get_pure_coeffs(GERGModel model, const std::string& gerg_name);
+
+/// Solve the 2x2 linear system that makes the IDEAL-GAS enthalpy and entropy
+/// both vanish at the reference state (T0, rho0), returning {n0[1], n0[2]}.
+///
+/// Direct port of teqp's AlphaigCoeffs::recalc_integration_constants
+/// (GERG.hpp:49-74), with the 2x2 Eigen solve written out by hand.  Only
+/// c.n0[3..7] and c.theta0[4..7] are read; c.n0[1] and c.n0[2] are ignored.
+///
+/// @param c      Coefficients as published (n0[1], n0[2] are not used)
+/// @param T0     Reference temperature, K
+/// @param Tci    Reducing temperature of the component, K
+/// @param rho0   Molar density at the reference state, mol/m^3
+/// @param rhoci  Reducing molar density of the component, mol/m^3
+/// @param Rstar_R  the ratio R*/R
+std::pair<double, double> recalc_integration_constants(const AlphaigCoeffs& c, double T0, double Tci, double rho0, double rhoci, double Rstar_R);
+
+/// Ideal-gas coefficients for one component, with n0[1] and n0[2] REPLACED by
+/// the values that give h = s = 0 for the ideal gas at 298.15 K and 101325 Pa.
+/// The published integration constants are deliberately discarded, exactly as
+/// teqp does in GERG200XAlphaig::get_coeffs (GERG.hpp:370-382); they refer to a
+/// different reference state and using them would leave p, c_v and w correct
+/// while h and s were quietly wrong.  Throws ValueError if gerg_name is not a
+/// component of the given model.
+AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name);
 
 }  // namespace GERG
 }  // namespace CoolProp

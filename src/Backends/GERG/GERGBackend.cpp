@@ -1,6 +1,8 @@
 #include "GERGBackend.h"
 
 #include <algorithm>
+#include <cmath>
+#include <utility>
 
 #include "CoolProp/CoolProp.h"
 #include "CoolProp/Exceptions.h"
@@ -179,6 +181,82 @@ const std::map<std::string, std::vector<double>>& n_main_2008_overrides() {
     return data;
 }
 
+// Ideal-gas coefficient tables, GERG-2004 monograph Table A3.1.
+//
+// Stored exactly as teqp stores them: {n0[1..7], theta0[4..7]}, i.e. 7 n and
+// 4 theta with no padding, so the literals line up one-for-one with teqp
+// GERG.hpp:470-487 (GERG-2004) and :1135-1141 (GERG-2008).  The padding to
+// length 8 that makes the monograph's 1-based indices work is applied in
+// pad_alphaig() below, just as teqp does on the way out of its accessor.
+//
+// n0[1] and n0[2] as tabulated here are the PUBLISHED integration constants.
+// get_alphaig_coeffs discards them; see recalc_integration_constants.
+
+using RawAlphaig = std::pair<std::vector<double>, std::vector<double>>;
+
+/// teqp GERG.hpp:470-487 (GERG2004::get_alphaig_coeffs dict).
+const std::map<std::string, RawAlphaig>& alphaig_2004() {
+    static const std::map<std::string, RawAlphaig> data = {
+      {"methane",
+       {{19.597538587, -83.959667892, 3.000880, 0.763150, 0.00460, 8.744320, -4.469210000}, {4.306474465, 0.936220902, 5.577233895, 5.722644361}}},
+      {"nitrogen", {{11.083437707, -22.202102428, 2.500310, 0.137320, -0.14660, 0.900660, 0}, {5.251822620, -5.393067706, 13.788988208, 0}}},
+      {"carbondioxide",
+       {{11.925182741, -16.118762264, 2.500020, 2.044520, -1.060440, 2.033660, 0.013930000}, {3.022758166, -2.844425476, 1.589964364, 1.121596090}}},
+      {"ethane",
+       {{24.675465518, -77.425313760, 3.002630, 4.339390, 1.237220, 13.19740, -6.019890000}, {1.831882406, 0.731306621, 3.378007481, 3.508721939}}},
+      {"propane",
+       {{31.602934734, -84.463284382, 3.029390, 6.605690, 3.1970, 19.19210, -8.372670000}, {1.297521801, 0.543210978, 2.583146083, 2.777773271}}},
+      {"n-butane",
+       {{20.884168790, -91.638478026, 3.339440, 9.448930, 6.894060, 24.46180, 14.782400000}, {1.101487798, 0.431957660, 4.502440459, 2.124516319}}},
+      {"isobutane",
+       {{20.413751434, -94.467620036, 3.067140, 8.975750, 5.251560, 25.14230, 16.138800000}, {1.074673199, 0.485556021, 4.671261865, 2.191583480}}},
+      {"n-pentane", {{14.536635738, -89.919548319, 3.0, 8.950430, 21.8360, 33.40320, 0}, {0.380391739, 1.789520971, 3.777411113, 0}}},
+      {"isopentane", {{15.449937973, -101.298172792, 3.0, 11.76180, 20.11010, 33.16880, 0}, {0.635392636, 1.977271641, 4.169371131, 0}}},
+      {"n-hexane", {{14.345993081, -96.165722367, 3.0, 11.69770, 26.81420, 38.61640, 0}, {0.359036667, 1.691951873, 3.596924107, 0}}},
+      {"n-heptane", {{15.063809621, -97.345252349, 3.0, 13.72660, 30.47070, 43.55610, 0}, {0.314348398, 1.548136560, 3.259326458, 0}}},
+      {"n-octane", {{15.864709639, -97.370667555, 3.0, 15.68650, 33.80290, 48.17310, 0}, {0.279143540, 1.431644769, 2.973845992, 0}}},
+      {"hydrogen",
+       {{13.796474934, -175.864487294, 1.479060, 0.958060, 0.454440, 1.560390, -1.375600000},
+        {6.891654113, 9.847634830, 49.765290750, 50.367279301}}},
+      {"oxygen", {{10.001874708, -14.996095135, 2.501460, 1.075580, 1.013340, 0, 0}, {14.461722565, 7.223325463, 0, 0}}},
+      {"carbonmonoxide", {{10.814500335, -19.843695435, 2.500550, 1.028650, 0.004930, 0, 0}, {11.675075301, 5.305158133, 0, 0}}},
+      {"water", {{8.203553050, -11.996306443, 3.003920, 0.010590, 0.987630, 3.069040, 0}, {0.415386589, 1.763895929, 3.874803739, 0}}},
+      {"helium", {{13.628441975, -143.470759602, 1.5, 0, 0, 0, 0}, {0, 0, 0, 0}}},
+      {"argon", {{8.316662546, -4.946502600, 1.50, 0, 0, 0, 0}, {0, 0, 0, 0}}}};
+    return data;
+}
+
+/// Entries GERG-2008 changes or adds relative to GERG-2004; everything else
+/// falls through to alphaig_2004().  teqp GERG.hpp:1135-1141.
+const std::map<std::string, RawAlphaig>& alphaig_2008_overrides() {
+    static const std::map<std::string, RawAlphaig> data = {
+      {"carbonmonoxide",
+       {{10.813340744, -19.834733959, 2.50055, 1.02865, 0.00493, 0, 0}, {11.669802800, 5.302762306, 0, 0}}},  // changed in GERG-2008
+      {"isopentane",
+       {{15.449907693, -101.298172792, 3.0, 11.76180, 20.11010, 33.16880, 0}, {0.635392636, 1.977271641, 4.169371131, 0}}},  // changed in GERG-2008
+      {"n-nonane", {{16.313913248, -102.160247463, 3.0, 18.02410, 38.12350, 53.34150, 0}, {0.263819696, 1.370586158, 2.848860483, 0}}},
+      {"n-decane", {{15.870791919, -108.858547525, 3.0, 21.00690, 43.49310, 58.36570, 0}, {0.267034159, 1.353835195, 2.833479035, 0}}},
+      {"hydrogensulfide", {{9.336197742, -16.266508995, 3.0, 3.11942, 1.00243, 0, 0}, {4.914580541, 2.270653980, 0, 0}}}};
+    return data;
+}
+
+/// Zero-pad the raw {7 n, 4 theta} tables up to the monograph's 1-based
+/// indexing: n0[1..7], theta0[4..7].  teqp GERG.hpp:497-506.
+AlphaigCoeffs pad_alphaig(const std::string& gerg_name, const RawAlphaig& raw) {
+    if (raw.first.size() != 7) {
+        throw ValueError(format("[%s] does not have 7 n coefficients in ideal gas", gerg_name.c_str()));
+    }
+    if (raw.second.size() != 4) {
+        throw ValueError(format("[%s] does not have 4 theta coefficients in ideal gas", gerg_name.c_str()));
+    }
+    AlphaigCoeffs c;
+    c.n0 = raw.first;
+    c.n0.insert(c.n0.begin(), 0.0);  // 0-pad so that indexing matches GERG-2004
+    c.theta0 = raw.second;
+    c.theta0.insert(c.theta0.begin(), 4, 0.0);  // 0-pad so that indexing matches GERG-2004
+    return c;
+}
+
 }  // namespace
 
 PureCoeffs get_pure_coeffs(GERGModel model, const std::string& gerg_name) {
@@ -220,6 +298,82 @@ PureCoeffs get_pure_coeffs(GERGModel model, const std::string& gerg_name) {
         }
     }
     throw ValueError(format("Unable to load GERG pure residual coefficients for [%s]", gerg_name.c_str()));
+}
+
+std::pair<double, double> recalc_integration_constants(const AlphaigCoeffs& c, double T0, double Tci, double rho0, double rhoci, double Rstar_R) {
+    // Faithful port of teqp GERG.hpp:49-74.  teqp builds two 3-element rows
+    // {coefficient of n0[1], coefficient of n0[2], everything else} for the
+    // reduced ideal-gas Helmholtz energy Aig00 and its tau-derivative Aig10,
+    // then solves the resulting 2x2 system with Eigen.  A 2x2 does not need
+    // Eigen, so it is written out by hand below; the row construction is kept
+    // literally identical so the two implementations stay diffable.
+    const double th = Tci / T0;
+    auto sinh_term = [&](std::size_t i) { return (c.n0[i] != 0) ? c.n0[i] * std::log(std::abs(std::sinh(c.theta0[i] * th))) : 0.0; };
+    auto cosh_term = [&](std::size_t i) { return (c.n0[i] != 0) ? c.n0[i] * std::log(std::abs(std::cosh(c.theta0[i] * th))) : 0.0; };
+    auto sinh_dterm = [&](std::size_t i) { return (c.n0[i] != 0) ? c.n0[i] * c.theta0[i] * th / std::tanh(c.theta0[i] * th) : 0.0; };
+
+    const double a00_0 = Rstar_R;
+    const double a00_1 = Rstar_R * th;
+    const double a00_2 = std::log(rho0 / rhoci) + Rstar_R * (c.n0[3] * std::log(th) + sinh_term(4) + sinh_term(6) - cosh_term(5) - cosh_term(7));
+
+    // NOTE: teqp guards the two sinh terms with `!= 0` but deliberately does
+    // NOT guard the two cosh terms (GERG.hpp:60-61).  Where n0[5] or n0[7] is
+    // zero the unguarded term evaluates to zero anyway, so the behaviour is
+    // identical; the asymmetry is preserved so the two sources stay diffable.
+    const double a10_0 = 0.0;
+    const double a10_1 = Rstar_R * th;
+    const double a10_2 = Rstar_R
+                         * (c.n0[3] + sinh_dterm(4) + sinh_dterm(6) - c.n0[5] * c.theta0[5] * th * std::tanh(c.theta0[5] * th)
+                            - c.n0[7] * c.theta0[7] * th * std::tanh(c.theta0[7] * th));
+
+    // Row 0: h0/(R*T0) = 1 + Aig10 = 0, so Aig10 = -1.
+    // Row 1: s0/R = Aig10 - Aig00 = 0.
+    const double A00 = a10_0, A01 = a10_1, b0 = -1.0 - a10_2;
+    const double A10 = a10_0 - a00_0, A11 = a10_1 - a00_1, b1 = -a10_2 + a00_2;
+
+    const double det = A00 * A11 - A01 * A10;
+    if (std::abs(det) < 1e-300) {
+        throw ValueError("GERG ideal-gas integration constants: singular 2x2 system");
+    }
+    const double n1 = (b0 * A11 - A01 * b1) / det;
+    const double n2 = (A00 * b1 - b0 * A10) / det;
+    return {n1, n2};
+}
+
+AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name) {
+    // Throws if gerg_name is not a component of this model, and gives us the
+    // reducing Tc/rhoc that the integration constants are solved against.
+    const PureInfo info = get_pure_info(model, gerg_name);
+
+    AlphaigCoeffs c;
+    bool found = false;
+    if (model == GERGModel::GERG_2008) {
+        const auto& ov = alphaig_2008_overrides();
+        auto it = ov.find(gerg_name);
+        if (it != ov.end()) {
+            c = pad_alphaig(gerg_name, it->second);
+            found = true;
+        }
+    }
+    if (!found) {
+        const auto& base = alphaig_2004();
+        auto it = base.find(gerg_name);
+        if (it == base.end()) {
+            throw ValueError(format("Unable to load GERG ideal-gas coefficients for [%s]", gerg_name.c_str()));
+        }
+        c = pad_alphaig(gerg_name, it->second);
+    }
+
+    // Discard the published integration constants and re-solve them so that
+    // h = s = 0 for the IDEAL GAS at 298.15 K and 101325 Pa.  teqp
+    // GERG.hpp:370-382.  Note that rho0 uses R, not R*.
+    const double T0 = 298.15;    // K
+    const double p0 = 101325.0;  // Pa
+    const double rho0 = p0 / (R_GERG * T0);
+    const auto n12 = recalc_integration_constants(c, T0, info.Tc_K, rho0, info.rhoc_molm3, RSTAR_GERG / R_GERG);
+    c.n0[1] = n12.first;
+    c.n0[2] = n12.second;
+    return c;
 }
 
 std::string resolve_component(GERGModel model, const std::string& user_name) {
