@@ -71,9 +71,15 @@ Establishes the factory path end to end before any thermodynamics exists. A `GER
 
 - [ ] **Step 1: Write the failing test**
 
-Create `src/Tests/CoolProp-Tests-GERG.cpp`:
+Create `src/Tests/CoolProp-Tests-GERG.cpp`. Every existing test file in
+`src/Tests/` wraps its whole body in `#if defined(ENABLE_CATCH)` — match that,
+and close the guard at the end of the file. The repo root is on the include
+path (`CMakeLists.txt:370`), so backend headers can be included as
+`"src/Backends/GERG/GERGData.h"`; check what neighbouring test files do and
+follow them.
 
 ```cpp
+#if defined(ENABLE_CATCH)
 #include <catch2/catch_all.hpp>
 #include <catch2/matchers/catch_matchers_floating_point.hpp>
 
@@ -100,7 +106,15 @@ TEST_CASE("GERG factory reaches the GERG backend", "[GERG]") {
     CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}), NotImplementedError);
     CHECK_THROWS_AS(AbstractState::factory("GERG2004", std::vector<std::string>{"Methane"}), NotImplementedError);
 }
+
+#endif /* ENABLE_CATCH */
 ```
+
+**This test is scaffolding with a scheduled death.** Task 8 implements the
+constructor, at which point asserting `NotImplementedError` becomes false and
+this test must be deleted — Task 8 Step 1 says so explicitly. Do not leave it
+behind; a test asserting that a feature is unimplemented, kept past the point
+where it is implemented, is worse than no test.
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -1219,10 +1233,16 @@ git commit --no-verify -m "test(gerg): teqp-generated reference values (CoolProp
   CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name);
   ```
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Delete the Task 1 skeleton test, then write the failing test**
+
+First delete `TEST_CASE("GERG factory reaches the GERG backend", "[GERG]")`
+from `src/Tests/CoolProp-Tests-GERG.cpp`. It asserts the constructor throws
+`NotImplementedError`, which this task makes false. Leaving it in place means
+this task's own build fails on a stale assertion. The
+`"GERG backend families are registered"` test stays — it is still true.
 
 ```cpp
-#include "../Backends/GERG/GERGReferenceValues.h"
+#include "src/Backends/GERG/GERGReferenceValues.h"
 
 TEST_CASE("GERG pure fluids reproduce teqp", "[GERG]") {
     for (const auto& pt : CoolProp::GERG::reference::pure_points_2008) {
@@ -1677,6 +1697,9 @@ git commit --no-verify -m "feat(gerg): strictness guards for components, BIPs an
       std::string type;  // "rhoLnoexp" | "rational" | "exponential" etc., matching CoolProp's ANCILLARIES schema
   };
   AncillaryCoeffs get_ancillary(GERGModel model, const std::string& gerg_name, const std::string& which);  // "pV" | "rhoL" | "rhoV"
+  /// Evaluate an ancillary at temperature T, returning the same units as
+  /// AncillaryCoeffs::reducing_value (Pa for "pV", mol/m^3 for "rhoL"/"rhoV").
+  double evaluate_ancillary(const AncillaryCoeffs& anc, double T);
   ```
 
 - [ ] **Step 1: Write the failing test**
