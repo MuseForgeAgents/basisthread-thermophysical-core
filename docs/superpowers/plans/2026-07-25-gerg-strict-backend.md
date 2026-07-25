@@ -644,7 +644,13 @@ Expected: compile failure — `get_pure_coeffs` undeclared.
 
 Source: `~/Code/teqp/include/teqp/models/GERG/GERG.hpp` lines 511-591 (`GERG2004::get_pure_coeffs`) and 1105-1131 (`GERG2008::get_pure_coeffs`).
 
-Note the structure teqp uses and preserve it: most fluids share one `t/d/c/l` exponent set and differ only in `n`; methane, nitrogen, carbon dioxide, ethane, hydrogen, oxygen, carbon monoxide, water, helium, and argon have their own longer sets. Keep the same split so the two files can be diffed by eye.
+Note the structure teqp uses and preserve it: most fluids share one generalized
+12-term `t/d/c/l` exponent set and differ only in `n`, while a minority carry
+their own longer sets. **Read teqp to determine which fluids fall in which
+group — do not trust a list written here.** (An earlier draft of this plan
+asserted that oxygen, carbon monoxide, and argon have their own sets; they do
+not, they share the 12-term set. teqp is the authority, not this document.)
+Keep the same split so the two files can be diffed by eye.
 
 Add to `GERGData.h`:
 
@@ -763,8 +769,11 @@ TEST_CASE("GERG ideal-gas theta values match the monograph", "[GERG]") {
     auto c = get_alphaig_coeffs(GERGModel::GERG_2004, "methane");
     REQUIRE(c.n0.size() == 8);
     REQUIRE(c.theta0.size() == 8);
-    CHECK_THAT(c.n0[3], Catch::Matchers::WithinRel(3.00160, 1e-12));
-    CHECK_THAT(c.theta0[4], Catch::Matchers::WithinRel(4.30632556, 1e-12));
+    // NOTE: an earlier draft of this plan had 3.00160 and 4.30632556 here.
+    // Both were wrong. These are teqp's actual values — read them from teqp,
+    // do not trust this document.
+    CHECK_THAT(c.n0[3], Catch::Matchers::WithinRel(3.000880, 1e-12));
+    CHECK_THAT(c.theta0[4], Catch::Matchers::WithinRel(4.306474465, 1e-12));
 }
 ```
 
