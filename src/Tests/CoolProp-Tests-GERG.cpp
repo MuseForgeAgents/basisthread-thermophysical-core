@@ -401,4 +401,41 @@ TEST_CASE("GERG-2004 and GERG-2008 share departure data", "[GERG]") {
     CHECK(get_departurecoeffs(GERGModel::GERG_2004, "methane", "nitrogen").n == get_departurecoeffs(GERGModel::GERG_2008, "methane", "nitrogen").n);
 }
 
+TEST_CASE("GERG departure_Npower throws on a non-contiguous polynomial block", "[GERG]") {
+    // None of the 15 real departure functions violate contiguity (all 15
+    // were checked by hand: see task-6-report.md), so this branch is
+    // otherwise never exercised anywhere in the suite. Construct one by
+    // hand: term 0 is polynomial (eta == beta == 0), term 1 is Gaussian,
+    // and term 2 reverts to polynomial -- exactly the layout
+    // GERG2008DepartureFunction's constructor cannot represent, since it
+    // assumes every polynomial term is a contiguous prefix.
+    DepartureCoeffs dc;
+    dc.n = {1.0, 2.0, 3.0};
+    dc.d = {1.0, 2.0, 3.0};
+    dc.t = {1.0, 2.0, 3.0};
+    dc.eta = {0.0, 1.0, 0.0};
+    dc.beta = {0.0, 1.0, 0.0};
+    dc.gamma = {0.0, 0.5, 0.0};
+    dc.epsilon = {0.0, 0.5, 0.0};
+    CHECK_THROWS_AS(departure_Npower(dc), CoolProp::ValueError);
+}
+
+TEST_CASE("GERG departure_Npower does not throw when every term is polynomial", "[GERG]") {
+    // The adjacent off-by-one to the case above: Npower == n.size() (no
+    // Gaussian block at all) is a real, valid layout -- the generalized
+    // departure function and methane/hydrogen's departure function are both
+    // like this (see task-6-report.md) -- and must NOT throw.
+    DepartureCoeffs dc;
+    dc.n = {1.0, 2.0, 3.0};
+    dc.d = {1.0, 2.0, 3.0};
+    dc.t = {1.0, 2.0, 3.0};
+    dc.eta = {0.0, 0.0, 0.0};
+    dc.beta = {0.0, 0.0, 0.0};
+    dc.gamma = {0.0, 0.0, 0.0};
+    dc.epsilon = {0.0, 0.0, 0.0};
+    std::size_t np = 0;
+    CHECK_NOTHROW(np = departure_Npower(dc));
+    CHECK(np == dc.n.size());
+}
+
 #endif /* ENABLE_CATCH */

@@ -414,31 +414,105 @@ FIJ_ROW_RE = re.compile(r'\{\{"([a-z0-9\-]+)"\s*,\s*"([a-z0-9\-]+)"\}\s*,\s*(' +
 DC_FIELD_RE = re.compile(r'dc\.(n|d|t|eta|epsilon|beta|gamma)\s*=\s*\{([^{}]*)\}\s*;', re.DOTALL)
 
 
-def parse_departure_block(blob):
-    """Parse a block containing one or more `dc.FIELD = {...};` runs into a
-    list of {field: tuple(values)} dicts, one per row.
-
-    teqp declares a SINGLE `DepartureCoeffs dc;` local once and reuses it
-    across every if/else branch (each branch assigns all 7 fields, then
-    `return dc;`), so splitting on the declaration would not separate rows.
-    Splitting on `return dc;` instead works for both sources: teqp emits one
-    per branch (7 fluid-specific + 1 generalized = 8), and CoolProp's
-    per-pair departure_*() functions each end the same way."""
-    for chunk in re.split(r'return dc\s*;', blob):
-        current = {}
-        for name, valstr in DC_FIELD_RE.findall(chunk):
-            current[name] = tuple(parse_floats(valstr))
-        if len(current) == 7 and len({len(v) for v in current.values()}) == 1:
-            yield current
-
-
-def parse_departure_rows(blob):
-    return list(parse_departure_block(blob))
-
-
 def row_key(row):
     """A hashable, order-independent fingerprint for one departure row."""
     return tuple(row[f] for f in ("n", "d", "t", "eta", "epsilon", "beta", "gamma"))
+
+
+def canon_pair(f1, f2):
+    return tuple(sorted((f1, f2)))
+
+
+# One `if (sortedpair == sortpair("f1","f2")){ ... return dc; }` branch per
+# fluid-pair-specific departure function -- captures which PAIR each row
+# belongs to, not just the row's content.
+SPECIFIC_IF_RE = re.compile(r'if \(sortedpair == sortpair\("([a-z0-9\-]+)"\s*,\s*"([a-z0-9\-]+)"\)\)\{(.*?)return dc\s*;', re.DOTALL)
+
+# The `generalized` std::set<pair<string,string>> that selects which pairs
+# use the shared generalized departure function, and the one branch that
+# returns it.
+GENERALIZED_SET_RE = re.compile(r'sortpair\("([a-z0-9\-]+)"\s*,\s*"([a-z0-9\-]+)"\)')
+GENERALIZED_ROW_RE = re.compile(r'if \(generalized\.find\(sortedpair\) != generalized\.end\(\)\)\{(.*?)return dc\s*;', re.DOTALL)
+
+# CoolProp: departure_specific_table()'s map keys, each pointing at a named
+# departure_<pair>() function; and generalized_departure_pairs()'s contents.
+CP_SPECIFIC_TABLE_ROW_RE = re.compile(r'\{\{"([a-z0-9\-]+)"\s*,\s*"([a-z0-9\-]+)"\}\s*,\s*(departure_\w+)\(\)\}')
+CP_NAMED_FN_RE = re.compile(r'DepartureCoeffs (departure_\w+|generalized_departure)\(\) \{(.*?)return dc\s*;', re.DOTALL)
+CP_GENERALIZED_PAIR_RE = re.compile(r'\{"([a-z0-9\-]+)"\s*,\s*"([a-z0-9\-]+)"\}')
+
+
+def parse_row_body(body):
+    row = {}
+    for name, valstr in DC_FIELD_RE.findall(body):
+        row[name] = tuple(parse_floats(valstr))
+    require(len(row) == 7 and len({len(v) for v in row.values()}) == 1, f"malformed departure row body: {body[:200]!r}")
+    return row
+
+
+def build_teqp_pair_rows(teqp_dep_blob):
+    """PAIR-KEYED (not just content-keyed) map of every one of the 15
+    departure pairs teqp defines to its 7-field row. This is what actually
+    proves a pair is wired to the RIGHT row, not merely that 8 distinct row
+    shapes exist somewhere in the source."""
+    generalized_set_blob = bounded(teqp_dep_blob, "const std::set<std::pair<std::string, std::string>> generalized = {", "\n    };",
+                                    "teqp generalized set")
+    generalized_pairs = {canon_pair(f1, f2) for f1, f2 in GENERALIZED_SET_RE.findall(generalized_set_blob)}
+    require(len(generalized_pairs) == 8, f"teqp `generalized` set has {len(generalized_pairs)} pairs, expected 8")
+
+    specific = {}
+    for f1, f2, body in SPECIFIC_IF_RE.findall(teqp_dep_blob):
+        pair = canon_pair(f1, f2)
+        require(pair not in specific, f"teqp: pair {pair} appears in more than one specific if-branch")
+        specific[pair] = parse_row_body(body)
+    require(len(specific) == 7, f"teqp has {len(specific)} fluid-pair-specific departure branches, expected 7")
+
+    gen_m = GENERALIZED_ROW_RE.search(teqp_dep_blob)
+    require(gen_m, "could not find teqp's generalized-departure-function branch")
+    gen_row = parse_row_body(gen_m.group(1))
+
+    pair_rows = dict(specific)
+    for pair in generalized_pairs:
+        require(pair not in pair_rows, f"teqp: pair {pair} is claimed by both a specific branch and the generalized set")
+        pair_rows[pair] = gen_row
+    require(len(pair_rows) == 15, f"teqp resolves {len(pair_rows)} total departure pairs, expected 15")
+    return pair_rows
+
+
+def build_cp_pair_rows(cp_dep_blob):
+    """Same PAIR-KEYED map as build_teqp_pair_rows, built from CoolProp's
+    departure_specific_table() (pair -> named function) plus
+    generalized_departure_pairs() (pair -> the shared generalized row),
+    resolving each named function to its own parsed row. This is what
+    actually catches a miswired pair (e.g. "methane","nitrogen" pointing at
+    departure_methane_ethane()) or a pair wrongly added to/missing from the
+    generalized set -- comparing unkeyed row content alone cannot."""
+    fn_rows = {}
+    for fn_name, body in CP_NAMED_FN_RE.findall(cp_dep_blob):
+        fn_rows[fn_name] = parse_row_body(body)
+    require("generalized_departure" in fn_rows, "could not find CoolProp's generalized_departure() body")
+
+    specific_table_blob = bounded(cp_dep_blob, "departure_specific_table() {\n    static const std::map<BIPKey, DepartureCoeffs> data = {",
+                                   "\n    };\n    return data;", "CoolProp departure_specific_table")
+    specific = {}
+    for f1, f2, fn_name in CP_SPECIFIC_TABLE_ROW_RE.findall(specific_table_blob):
+        pair = canon_pair(f1, f2)
+        require(fn_name in fn_rows, f"departure_specific_table() references undefined function {fn_name}() for pair {pair}")
+        require(pair not in specific, f"CoolProp: pair {pair} appears twice in departure_specific_table()")
+        specific[pair] = fn_rows[fn_name]
+    require(len(specific) == 7, f"CoolProp departure_specific_table() has {len(specific)} rows, expected 7")
+
+    gen_pairs_blob = bounded(cp_dep_blob, "generalized_departure_pairs() {\n    static const std::vector<BIPKey> pairs = {", "\n    };\n    return pairs;",
+                              "CoolProp generalized_departure_pairs")
+    generalized_pairs = {canon_pair(f1, f2) for f1, f2 in CP_GENERALIZED_PAIR_RE.findall(gen_pairs_blob)}
+    require(len(generalized_pairs) == 8, f"CoolProp generalized_departure_pairs() has {len(generalized_pairs)} pairs, expected 8")
+
+    pair_rows = dict(specific)
+    for pair in generalized_pairs:
+        require(pair not in pair_rows, f"CoolProp: pair {pair} is claimed by both departure_specific_table() and "
+                                        "generalized_departure_pairs()")
+        pair_rows[pair] = fn_rows["generalized_departure"]
+    require(len(pair_rows) == 15, f"CoolProp resolves {len(pair_rows)} total departure pairs, expected 15")
+    return pair_rows
 
 
 def check_departure(teqp_text, coolprop_text):
@@ -469,36 +543,56 @@ def check_departure(teqp_text, coolprop_text):
     require(with_scaled_f == 7, f"teqp Fij_dict has {with_scaled_f} entries with F_ij != 1, expected 7")
 
     # Departure coefficients: get_departurecoeffs (teqp) vs the specific-pair
-    # functions + generalized_departure() (CoolProp). Both are compared as
-    # SETS of order-independent row fingerprints (n,d,t,eta,epsilon,beta,
-    # gamma tuples) rather than pair-keyed, because teqp's generalized
-    # departure function is emitted once per matching pair (duplicated 8x in
-    # its own source across the if/else chain) while CoolProp's
-    # generalized_departure() is a single shared function -- comparing sets
-    # of distinct rows sidesteps that structural difference entirely.
+    # functions + generalized_departure() (CoolProp). PAIR-KEYED: this
+    # verifies which PAIR each row belongs to, not just that the same 8
+    # distinct row shapes exist somewhere on both sides. An earlier version
+    # of this check compared unkeyed sets of row fingerprints, which cannot
+    # detect a miswired pair (e.g. methane/nitrogen accidentally pointing at
+    # methane/ethane's row) or a pair wrongly added to/missing from the
+    # generalized set -- the set of 8 distinct blobs would be unchanged.
+    # build_teqp_pair_rows/build_cp_pair_rows resolve each side's own
+    # pair -> function/branch -> row wiring from the source text itself,
+    # so a miswiring shows up as a value mismatch (or a missing/extra pair)
+    # for that specific pair, exactly like the F_ij check above.
     teqp_dep_blob = bounded(teqp_text, "inline DepartureCoeffs get_departurecoeffs(const std::string&fluid1, const std::string &fluid2){",
                             '\n    throw std::invalid_argument("could not get departure coeffs', "teqp get_departurecoeffs")
     cp_dep_blob = bounded(coolprop_text, "// Departure-function tables: F_ij scaling factors and departure coefficients.",
                           "bool is_generalized_departure_pair", "CoolProp departure tables")
 
-    teqp_rows = parse_departure_rows(teqp_dep_blob)
-    cp_rows = parse_departure_rows(cp_dep_blob)
+    teqp_pairs = build_teqp_pair_rows(teqp_dep_blob)
+    cp_pairs = build_cp_pair_rows(cp_dep_blob)
 
-    teqp_distinct = {row_key(r): r for r in teqp_rows}
-    cp_distinct = {row_key(r): r for r in cp_rows}
+    dep_mismatches = []
+    for pair, trow in teqp_pairs.items():
+        crow = cp_pairs.get(pair)
+        if crow is None:
+            dep_mismatches.append(f"departure pair {pair} present in teqp, missing in CoolProp")
+            continue
+        for field in ("n", "d", "t", "eta", "epsilon", "beta", "gamma"):
+            if not vec_close(trow[field], crow[field]):
+                dep_mismatches.append(f"departure pair {pair} field {field}: teqp {trow[field]} != CoolProp {crow[field]}")
+    for pair in cp_pairs:
+        if pair not in teqp_pairs:
+            dep_mismatches.append(f"departure pair {pair} present in CoolProp, missing in teqp")
 
-    require(len(teqp_distinct) == 8, f"teqp get_departurecoeffs has {len(teqp_distinct)} distinct rows, expected 8 "
-                                      "(7 fluid-specific + 1 generalized)")
-    require(len(cp_distinct) == 8, f"CoolProp departure tables have {len(cp_distinct)} distinct rows, expected 8 "
-                                    "(7 fluid-specific + 1 generalized)")
-
-    missing_in_cp = [k for k in teqp_distinct if k not in cp_distinct]
-    missing_in_teqp = [k for k in cp_distinct if k not in teqp_distinct]
-    require(not missing_in_cp, f"{len(missing_in_cp)} distinct teqp departure row(s) have no exact match in CoolProp")
-    require(not missing_in_teqp, f"{len(missing_in_teqp)} distinct CoolProp departure row(s) have no exact match in teqp")
-
+    # Report the pair-keyed mismatches (most specific: names the exact pair
+    # and field) before the secondary distinct-shape count below, so a
+    # miswired pair is diagnosed by WHICH pair, not just a raw count.
+    require(not dep_mismatches, "departure-coefficient mismatches:\n  " + "\n  ".join(dep_mismatches))
     require(not mismatches, "F_ij mismatches:\n  " + "\n  ".join(mismatches))
-    print(f"  F_ij rows: {len(teqp_fij)} (scaled: {with_scaled_f}), distinct departure rows: {len(teqp_distinct)} -- all match. OK")
+
+    # Secondary sanity check retained from the original version: the number
+    # of DISTINCT row shapes should still be 8 (7 specific + 1 generalized)
+    # on both sides -- catches accidental duplication/typo'd near-duplicate
+    # rows that the pair-keyed check above wouldn't flag as a "missing pair"
+    # (e.g. two genuinely different pairs both accidentally wired to the
+    # same specific-function name, keeping every pair "present" but wrong).
+    teqp_distinct = {row_key(r) for r in teqp_pairs.values()}
+    cp_distinct = {row_key(r) for r in cp_pairs.values()}
+    require(len(teqp_distinct) == 8, f"teqp departure rows resolve to {len(teqp_distinct)} distinct shapes, expected 8")
+    require(len(cp_distinct) == 8, f"CoolProp departure rows resolve to {len(cp_distinct)} distinct shapes, expected 8")
+    print(f"  F_ij rows: {len(teqp_fij)} (scaled: {with_scaled_f}), departure pairs: {len(teqp_pairs)} "
+          f"(distinct row shapes: {len(teqp_distinct)}) -- all match, pair-keyed. OK")
 
 
 def main():
