@@ -55,25 +55,24 @@ namespace detail {
 /// converted to mol/m^3, K, kg/mol on the way out of get_pure_info.
 /// Transcribed from teqp GERG.hpp:438-457 (GERG2004::get_pure_info data_map).
 inline const std::map<std::string, PureInfo>& pure_info_2004() {
-    static const std::map<std::string, PureInfo> data = {
-      {"methane", {10.139342719, 190.564000000, 16.042460}},
-      {"nitrogen", {11.183900000, 126.192000000, 28.013400}},
-      {"carbondioxide", {10.624978698, 304.128200000, 44.009500}},
-      {"ethane", {6.870854540, 305.322000000, 30.069040}},
-      {"propane", {5.000043088, 369.825000000, 44.095620}},
-      {"n-butane", {3.920016792, 425.125000000, 58.122200}},
-      {"isobutane", {3.860142940, 407.817000000, 58.122200}},
-      {"n-pentane", {3.215577588, 469.700000000, 72.148780}},
-      {"isopentane", {3.271018581, 460.350000000, 72.148780}},
-      {"n-hexane", {2.705877875, 507.820000000, 86.175360}},
-      {"n-heptane", {2.315324434, 540.130000000, 100.201940}},
-      {"n-octane", {2.056404127, 569.320000000, 114.228520}},
-      {"hydrogen", {14.940000000, 33.190000000, 2.015880}},
-      {"oxygen", {13.630000000, 154.595000000, 31.998800}},
-      {"carbonmonoxide", {10.850000000, 132.800000000, 28.010100}},
-      {"water", {17.873716090, 647.096000000, 18.015280}},
-      {"helium", {17.399000000, 5.195300000, 4.002602}},
-      {"argon", {13.407429659, 150.687, 39.948000}}};
+    static const std::map<std::string, PureInfo> data = {{"methane", {10.139342719, 190.564000000, 16.042460}},
+                                                         {"nitrogen", {11.183900000, 126.192000000, 28.013400}},
+                                                         {"carbondioxide", {10.624978698, 304.128200000, 44.009500}},
+                                                         {"ethane", {6.870854540, 305.322000000, 30.069040}},
+                                                         {"propane", {5.000043088, 369.825000000, 44.095620}},
+                                                         {"n-butane", {3.920016792, 425.125000000, 58.122200}},
+                                                         {"isobutane", {3.860142940, 407.817000000, 58.122200}},
+                                                         {"n-pentane", {3.215577588, 469.700000000, 72.148780}},
+                                                         {"isopentane", {3.271018581, 460.350000000, 72.148780}},
+                                                         {"n-hexane", {2.705877875, 507.820000000, 86.175360}},
+                                                         {"n-heptane", {2.315324434, 540.130000000, 100.201940}},
+                                                         {"n-octane", {2.056404127, 569.320000000, 114.228520}},
+                                                         {"hydrogen", {14.940000000, 33.190000000, 2.015880}},
+                                                         {"oxygen", {13.630000000, 154.595000000, 31.998800}},
+                                                         {"carbonmonoxide", {10.850000000, 132.800000000, 28.010100}},
+                                                         {"water", {17.873716090, 647.096000000, 18.015280}},
+                                                         {"helium", {17.399000000, 5.195300000, 4.002602}},
+                                                         {"argon", {13.407429659, 150.687, 39.948000}}};
     return data;
 }
 
@@ -98,13 +97,12 @@ inline const std::map<std::string, PureInfo>& pure_info_2008_overrides() {
 /// transcript).
 inline const std::map<std::string, std::string>& cas_to_gerg() {
     static const std::map<std::string, std::string> data = {
-      {"74-82-8", "methane"},        {"7727-37-9", "nitrogen"},        {"124-38-9", "carbondioxide"},
-      {"74-84-0", "ethane"},         {"74-98-6", "propane"},           {"106-97-8", "n-butane"},
-      {"75-28-5", "isobutane"},      {"109-66-0", "n-pentane"},        {"78-78-4", "isopentane"},
-      {"110-54-3", "n-hexane"},      {"142-82-5", "n-heptane"},        {"111-65-9", "n-octane"},
-      {"1333-74-0", "hydrogen"},     {"7782-44-7", "oxygen"},          {"630-08-0", "carbonmonoxide"},
-      {"7732-18-5", "water"},        {"7440-59-7", "helium"},          {"7440-37-1", "argon"},
-      {"7783-06-4", "hydrogensulfide"}, {"111-84-2", "n-nonane"},      {"124-18-5", "n-decane"}};
+      {"74-82-8", "methane"},    {"7727-37-9", "nitrogen"}, {"124-38-9", "carbondioxide"},    {"74-84-0", "ethane"},
+      {"74-98-6", "propane"},    {"106-97-8", "n-butane"},  {"75-28-5", "isobutane"},         {"109-66-0", "n-pentane"},
+      {"78-78-4", "isopentane"}, {"110-54-3", "n-hexane"},  {"142-82-5", "n-heptane"},        {"111-65-9", "n-octane"},
+      {"1333-74-0", "hydrogen"}, {"7782-44-7", "oxygen"},   {"630-08-0", "carbonmonoxide"},   {"7732-18-5", "water"},
+      {"7440-59-7", "helium"},   {"7440-37-1", "argon"},    {"7783-06-4", "hydrogensulfide"}, {"111-84-2", "n-nonane"},
+      {"124-18-5", "n-decane"}};
     return data;
 }
 
@@ -112,9 +110,9 @@ inline const std::map<std::string, std::string>& cas_to_gerg() {
 
 /// GERG2004::component_names, teqp GERG.hpp:431.
 inline const std::vector<std::string>& component_names(GERGModel model) {
-    static const std::vector<std::string> names_2004 = {
-      "methane", "nitrogen", "carbondioxide", "ethane", "propane", "n-butane", "isobutane", "n-pentane", "isopentane",
-      "n-hexane", "n-heptane", "n-octane", "hydrogen", "oxygen", "carbonmonoxide", "water", "helium", "argon"};
+    static const std::vector<std::string> names_2004 = {"methane",   "nitrogen",  "carbondioxide",  "ethane",   "propane",   "n-butane",
+                                                        "isobutane", "n-pentane", "isopentane",     "n-hexane", "n-heptane", "n-octane",
+                                                        "hydrogen",  "oxygen",    "carbonmonoxide", "water",    "helium",    "argon"};
     // GERG2008::component_names, teqp GERG.hpp:973, is names_2004 plus these three.
     static const std::vector<std::string> names_2008 = [] {
         std::vector<std::string> v = names_2004;

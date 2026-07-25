@@ -1,10 +1,10 @@
 #if defined(ENABLE_CATCH)
-#include <catch2/catch_all.hpp>
-#include <catch2/matchers/catch_matchers_floating_point.hpp>
+#    include <catch2/catch_all.hpp>
+#    include <catch2/matchers/catch_matchers_floating_point.hpp>
 
-#include "CoolProp/AbstractState.h"
-#include "CoolProp/DataStructures.h"
-#include "CoolProp/Exceptions.h"
+#    include "CoolProp/AbstractState.h"
+#    include "CoolProp/DataStructures.h"
+#    include "CoolProp/Exceptions.h"
 
 using namespace CoolProp;
 
@@ -26,7 +26,7 @@ TEST_CASE("GERG factory reaches the GERG backend", "[GERG]") {
     CHECK_THROWS_AS(AbstractState::factory("GERG2004", std::vector<std::string>{"Methane"}), NotImplementedError);
 }
 
-#include "../Backends/GERG/GERGData.h"
+#    include "../Backends/GERG/GERGData.h"
 
 using namespace CoolProp::GERG;
 
