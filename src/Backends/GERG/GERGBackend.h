@@ -6,15 +6,14 @@
 
 #include "../Helmholtz/HelmholtzEOSMixtureBackend.h"
 #include "CoolProp/DataStructures.h"
+#include "GERGData.h"
 
 namespace CoolProp {
 
-/// Which GERG model year this backend instance represents.
-enum class GERGModel
-{
-    GERG_2004,
-    GERG_2008
-};
+/// Which GERG model year this backend instance represents.  Defined in
+/// GERGData.h (CoolProp::GERG::GERGModel); aliased here so backend code can
+/// keep referring to it as CoolProp::GERGModel.
+using GERGModel = GERG::GERGModel;
 
 /**
  * \brief Strict GERG-2004 / GERG-2008 backend.
