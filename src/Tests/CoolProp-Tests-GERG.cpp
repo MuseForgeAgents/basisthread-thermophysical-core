@@ -462,13 +462,21 @@ struct RefTally
 /// `computed` is only evaluated when the reference field is finite -- some of
 /// the NaN'd fields (w on the mechanically unstable branch) correspond to
 /// states where CoolProp's own evaluation is meaningless too.
+///
+/// `label` is not decoration: all five comparisons below render identically in
+/// Catch2's output (`CHECK_THAT(static_cast<double>(computed()), ...)`), and
+/// the surrounding CAPTURE carries only backend/name/T/rho.  Without the label
+/// a failure cannot be attributed to a field, which is exactly the information
+/// needed to localize a regression (an alphaig-only failure means the
+/// ideal-gas constants; a p-only failure means R_u; and so on).
 template <typename F>
-void check_field(double reference, F&& computed, double rel_tol, RefTally& tally) {
+void check_field(const char* label, double reference, F&& computed, double rel_tol, RefTally& tally) {
     if (std::isnan(reference)) {
         ++tally.nan_skipped;
         return;
     }
     ++tally.compared;
+    INFO("field := " << label);
     CHECK_THAT(static_cast<double>(computed()), Catch::Matchers::WithinRel(reference, rel_tol));
 }
 
@@ -495,11 +503,11 @@ void compare_pure_points(const std::string& backend, const std::vector<CoolProp:
         // alphaig is the ONLY assertion here that can see a wrong ideal-gas
         // integration constant, a missing R*/R or a negated cosh coefficient:
         // p, c_v and w are all blind to those.
-        check_field(pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
-        check_field(pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
-        check_field(pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
-        check_field(pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
-        check_field(pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
     }
 }
 
@@ -560,6 +568,98 @@ TEST_CASE("GERG pure fluid reference state gives h = s = 0 for the ideal gas", "
             CHECK_THAT(s_ig_over_R, Catch::Matchers::WithinAbs(0.0, 1e-8));
         }
     }
+}
+
+TEST_CASE("GERG pure fluid reports the GERG reducing point as its critical point", "[GERG]") {
+    // Coverage for `fluid.crit = EOS.reduce` in make_gerg_fluid.  That
+    // assignment is what feeds get_fluid_constant(i, iT_critical) /
+    // irhomolar_critical, which is ALL the mixture branch of
+    // calc_alpha0_deriv_nocache reads for T_ci / rho_ci -- but the pure branch
+    // reads EOS().reduce instead, so deleting the assignment leaves every
+    // other assertion in this file green while silently breaking Task 9.
+    // AbstractState::T_critical()/rhomolar_critical()/p_critical() read
+    // fluid.crit (HelmholtzEOSMixtureBackend::calc_*_critical, pure branch,
+    // no superancillary available for a GERG fluid), so they pin it here.
+    struct Case
+    {
+        const char* backend;
+        const char* name;
+        double Tc_K;
+        double rhoc_molm3;
+    };
+    const std::vector<Case> cases = {
+      {"GERG2008", "methane", 190.564, 10.139342719e3},
+      {"GERG2004", "methane", 190.564, 10.139342719e3},
+      {"GERG2008", "water", 647.096, 17.873716090e3},
+      {"GERG2004", "helium", 5.1953, 17.399e3},
+      // GERG-2008 moved the reducing point of both of these relative to
+      // GERG-2004, so the pair also proves crit follows the MODEL's table
+      // and not a single shared one.
+      {"GERG2004", "carbonmonoxide", 132.800, 10.85e3},
+      {"GERG2008", "carbonmonoxide", 132.860, 10.85e3},
+      {"GERG2004", "isopentane", 460.350, 3.271018581e3},
+      {"GERG2008", "isopentane", 460.350, 3.271e3},
+      {"GERG2008", "n-decane", 617.7, 1.64e3},
+    };
+    for (const auto& c : cases) {
+        CAPTURE(c.backend, c.name);
+        std::shared_ptr<AbstractState> AS(AbstractState::factory(c.backend, std::vector<std::string>{c.name}));
+        CHECK_THAT(AS->T_critical(), Catch::Matchers::WithinRel(c.Tc_K, 1e-12));
+        CHECK_THAT(AS->rhomolar_critical(), Catch::Matchers::WithinRel(c.rhoc_molm3, 1e-12));
+        // crit must agree with reduce, since the two branches of
+        // calc_alpha0_deriv_nocache read different ones.
+        CHECK_THAT(AS->T_critical(), Catch::Matchers::WithinRel(AS->T_reducing(), 1e-15));
+        CHECK_THAT(AS->rhomolar_critical(), Catch::Matchers::WithinRel(AS->rhomolar_reducing(), 1e-15));
+        // p_critical() is inf unless reduce.p was filled in from the EOS.
+        CHECK(ValidNumber(AS->p_critical()));
+        CHECK(AS->p_critical() > 0);
+    }
+
+    // The pressure at the reducing point is evaluated from the GERG EOS
+    // itself, so it must reproduce an independent single-phase evaluation at
+    // (Tc, rhoc) -- and land near the published critical pressures.
+    std::shared_ptr<AbstractState> CH4(AbstractState::factory("GERG2008", std::vector<std::string>{"methane"}));
+    CH4->specify_phase(iphase_gas);
+    CH4->update(DmolarT_INPUTS, CH4->rhomolar_reducing(), CH4->T_reducing());
+    CHECK_THAT(CH4->p_critical(), Catch::Matchers::WithinRel(CH4->p(), 1e-12));
+    CHECK_THAT(CH4->p_critical(), Catch::Matchers::WithinRel(4.5992e6, 1e-3));  // methane p_c, 4.5992 MPa
+}
+
+TEST_CASE("GERG limits are not self-contradictory", "[GERG]") {
+    // The published 60-700 K range is a MIXTURE-model range; taken literally
+    // per component it would put Tmin above Tcrit for helium (5.1953 K) and
+    // hydrogen (33.19 K) -- while this very test file evaluates helium down to
+    // 0.7*Tc = 3.64 K.  make_gerg_fluid caps Tmin at the reducing temperature.
+    for (const auto& model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        const std::string backend = (model == GERGModel::GERG_2004) ? "GERG2004" : "GERG2008";
+        for (const auto& name : component_names(model)) {
+            CAPTURE(backend, name);
+            std::shared_ptr<AbstractState> AS(AbstractState::factory(backend, std::vector<std::string>{name}));
+            CHECK(AS->Tmin() <= AS->T_critical());
+            CHECK(AS->Tmax() >= AS->T_critical());
+        }
+    }
+}
+
+TEST_CASE("GERG canonical-name fast path does not weaken model strictness", "[GERG]") {
+    // resolve_component returns a canonical GERG name unchanged, which is the
+    // path that makes component_names() round-trip through the factory.  That
+    // early return must NOT let a GERG-2008-only component in through the
+    // GERG-2004 model: the three fluids GERG-2008 adds are absent from
+    // component_names(GERG_2004), so they miss the fast path and fall through
+    // to the CAS route, which rejects them.
+    for (const char* name : {"hydrogensulfide", "n-nonane", "n-decane"}) {
+        CAPTURE(name);
+        CHECK_THROWS_AS(resolve_component(GERGModel::GERG_2004, name), CoolProp::ValueError);
+        CHECK(resolve_component(GERGModel::GERG_2008, name) == std::string(name));
+        // ... and the same through the factory, not just the resolver.
+        CHECK_THROWS_AS(AbstractState::factory("GERG2004", std::vector<std::string>{name}), CoolProp::ValueError);
+        CHECK_NOTHROW(std::shared_ptr<AbstractState>(AbstractState::factory("GERG2008", std::vector<std::string>{name})));
+    }
+    // A canonical-looking name that is not a GERG component at all still goes
+    // down the CAS route and is still rejected.
+    CHECK_THROWS_AS(resolve_component(GERGModel::GERG_2008, "r134a"), CoolProp::ValueError);
+    CHECK_THROWS_AS(resolve_component(GERGModel::GERG_2008, "n-undecane"), CoolProp::ValueError);
 }
 
 TEST_CASE("GERG backend rejects an empty component list", "[GERG]") {

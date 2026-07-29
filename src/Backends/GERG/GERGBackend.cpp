@@ -1005,11 +1005,22 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
     // iT_critical on the mixture branch, and they must agree.
     EOS.reduce.T = info.Tc_K;
     EOS.reduce.rhomolar = info.rhoc_molm3;
-    fluid.crit = EOS.reduce;
+    // fluid.crit is assigned from EOS.reduce AFTER the residual terms exist,
+    // because reduce.p is evaluated from them (below).
 
     // GERG-2008 extended range of validity: 60-700 K, p <= 70 MPa
-    // (Kunz & Wagner 2012, section 4.1).
-    EOS.limits.Tmin = 60.0;
+    // (Kunz & Wagner 2012, section 4.1).  That range is published for the
+    // MIXTURE model as a whole; GERG publishes no per-component lower
+    // temperature limit, and CoolProp's own triple-point data is deliberately
+    // not consulted here (a strict GERG backend must not borrow it).  Taking
+    // the published 60 K literally would leave Tmin ABOVE the reducing
+    // temperature for helium (5.1953 K) and hydrogen (33.19 K), i.e. a
+    // self-contradictory limit set, so Tmin is capped at the component's own
+    // reducing temperature.  That only removes the contradiction -- it is not
+    // a claim about where the component EOS stops being valid.  Task 11 must
+    // document that the authoritative range is the mixture-model range and
+    // that a pure-component Tmin below 60 K is not a validity statement.
+    EOS.limits.Tmin = std::min(60.0, info.Tc_K);
     EOS.limits.Tmax = 700.0;
     EOS.limits.pmax = 70e6;
     EOS.limits.rhomax = 1e6;
@@ -1027,6 +1038,25 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
         EOS.alphar.GenExp.add_Power(n, d, t, l);
         EOS.alphar.GenExp.finish();
     }
+
+    // Pressure at the reducing state, from the EOS that was just assembled:
+    // p = rho*R*T*(1 + delta*dalphar/ddelta) evaluated at tau = delta = 1.
+    // Without this, SimpleState's _HUGE default propagates and
+    // AbstractState::p_critical() returns inf (calc_p_critical returns
+    // components[0].crit.p for a pure fluid).  Note this is the pressure at
+    // the GERG REDUCING point, which for a handful of components is a fitted
+    // point rather than the measured critical point -- it is the only
+    // pressure the GERG tables can produce without importing outside data.
+    EOS.reduce.p = info.rhoc_molm3 * R_GERG * info.Tc_K * (1.0 + EOS.dalphar_dDelta(1.0, 1.0));
+
+    // get_fluid_constant maps iT_critical/irhomolar_critical to fluid.crit and
+    // iT_reducing/irhomolar_reducing to EOS().reduce; calc_alpha0_deriv_nocache
+    // reads the reducing pair on the pure branch and the critical pair on the
+    // mixture branch, so the two MUST agree.  AbstractState::T_critical() /
+    // rhomolar_critical() / p_critical() also read fluid.crit, which is what
+    // the "GERG pure fluid reports the GERG reducing point as its critical
+    // point" test pins.
+    fluid.crit = EOS.reduce;
 
     // --- Ideal-gas part ------------------------------------------------
     //
@@ -1124,6 +1154,13 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
         }
     }
 
+    // NOTE: EquationOfState::validate() (CoolPropFluid.h:450-453) is two bare
+    // assert()s on R_u and molar_mass, so it is compiled out entirely under
+    // NDEBUG -- i.e. in the mandated Release build it does nothing.  It is
+    // called because it is the conventional end of a fluid build, NOT because
+    // it guards anything here.  The real coverage for R_u and molar_mass is
+    // the reference `w` column (w = sqrt(-R T/M * ...)) and the
+    // "uses the GERG gas constant and reducing state" test.
     EOS.validate();
     return fluid;
 }
