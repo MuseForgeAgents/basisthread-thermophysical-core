@@ -11,8 +11,23 @@
 namespace CoolProp {
 
 GERGMixtureBackend::GERGMixtureBackend(GERGModel model, const std::vector<std::string>& names) : m_model(model) {
-    (void)names;
-    throw NotImplementedError("GERG backend is not yet implemented");
+    if (names.empty()) {
+        throw ValueError("GERG backend requires at least one component");
+    }
+    std::vector<CoolPropFluid> fluids;
+    fluids.reserve(names.size());
+    for (const auto& user_name : names) {
+        // resolve_component throws if the fluid is outside this model's
+        // published component set, so an unsupported component can never
+        // reach make_gerg_fluid.
+        fluids.push_back(GERG::make_gerg_fluid(model, GERG::resolve_component(model, user_name)));
+    }
+    // For N == 1 this does NOT call set_mixture_parameters(); for N > 1 it
+    // does, and the GERG override of that lands in Task 9.
+    set_components(fluids);
+    if (names.size() == 1) {
+        set_mole_fractions(std::vector<CoolPropDbl>(1, 1.0));
+    }
 }
 
 namespace GERG {
@@ -839,8 +854,21 @@ AlphaigCoeffs get_alphaig_coeffs(GERGModel model, const std::string& gerg_name) 
 }
 
 std::string resolve_component(GERGModel model, const std::string& user_name) {
-    // Resolve through CoolProp's normal alias/CAS machinery first, so users
-    // can spell components the way they do everywhere else in CoolProp.
+    // A canonical GERG component name resolves to itself.  Several of them
+    // ("n-butane", "carbondioxide", "hydrogensulfide", ...) are NOT spellings
+    // CoolProp's own alias machinery recognises, so without this fast path
+    // component_names(model) would not round-trip through the factory --
+    // i.e. AbstractState::factory("GERG2008", {component_names(...)[5]})
+    // would throw.
+    {
+        const auto& names = component_names(model);
+        if (std::find(names.begin(), names.end(), user_name) != names.end()) {
+            return user_name;
+        }
+    }
+
+    // Otherwise resolve through CoolProp's normal alias/CAS machinery, so
+    // users can spell components the way they do everywhere else in CoolProp.
     std::string cas;
     try {
         cas = get_fluid_param_string(user_name, "CAS");
@@ -941,6 +969,163 @@ std::size_t departure_Npower(const DepartureCoeffs& dc) {
         }
     }
     return np;
+}
+
+CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
+    const PureInfo info = get_pure_info(model, gerg_name);
+    const PureCoeffs pc = get_pure_coeffs(model, gerg_name);
+    // get_alphaig_coeffs re-solves a 2x2 system on every call.  It is called
+    // exactly once per component here, at construction; nothing in a flash
+    // loop may call it (task-4-report.md, "All tasks").
+    const AlphaigCoeffs ac = get_alphaig_coeffs(model, gerg_name);
+
+    CoolPropFluid fluid;
+    fluid.name = gerg_name;
+    fluid.EOSVector.resize(1);
+    EquationOfState& EOS = fluid.EOS();
+
+    EOS.R_u = R_GERG;  // 8.314472, NOT CoolProp's per-fluid R and NOT R*
+    EOS.molar_mass = info.M_kgmol;
+    EOS.pseudo_pure = false;
+    // EquationOfState has no default constructor, so every scalar it owns has
+    // to be written here or it stays indeterminate.  GERG publishes no
+    // acentric factor and no triple point, so those are set to sentinels:
+    // Ttriple = 0 keeps the (T > Tc && T > Ttriple) supercritical branch of
+    // FlashRoutines::DHSU_T_flash reachable at every temperature the EOS is
+    // evaluated at, including helium's 3.6 K.
+    EOS.acentric = _HUGE;
+    EOS.Ttriple = 0.0;
+    EOS.ptriple = _HUGE;
+
+    // Reducing state == the GERG reducing state of Table A3.5.  For most
+    // components this is the critical point; for a few (methane, water, ...)
+    // the tabulated rho_c is a fitted reducing density rather than the true
+    // critical density.  Both `reduce` and `crit` are set from it because
+    // calc_alpha0_deriv_nocache reads iT_reducing on the pure branch and
+    // iT_critical on the mixture branch, and they must agree.
+    EOS.reduce.T = info.Tc_K;
+    EOS.reduce.rhomolar = info.rhoc_molm3;
+    fluid.crit = EOS.reduce;
+
+    // GERG-2008 extended range of validity: 60-700 K, p <= 70 MPa
+    // (Kunz & Wagner 2012, section 4.1).
+    EOS.limits.Tmin = 60.0;
+    EOS.limits.Tmax = 700.0;
+    EOS.limits.pmax = 70e6;
+    EOS.limits.rhomax = 1e6;
+
+    // --- Residual part -------------------------------------------------
+    // alpha^r = sum_i n_i delta^{d_i} tau^{t_i} exp(-c_i delta^{l_i}), with
+    // c_i == 1 exactly when l_i > 0.  add_Power derives c from l that same
+    // way, so PureCoeffs::c is not passed (it exists only for diffing against
+    // teqp).
+    {
+        const std::vector<CoolPropDbl> n(pc.n.begin(), pc.n.end());
+        const std::vector<CoolPropDbl> d(pc.d.begin(), pc.d.end());
+        const std::vector<CoolPropDbl> t(pc.t.begin(), pc.t.end());
+        const std::vector<CoolPropDbl> l(pc.l.begin(), pc.l.end());
+        EOS.alphar.GenExp.add_Power(n, d, t, l);
+        EOS.alphar.GenExp.finish();
+    }
+
+    // --- Ideal-gas part ------------------------------------------------
+    //
+    // The expression the stored table is defined against (GERGData.h):
+    //
+    //   alpha^o_i = ln(rho/rho_c,i)
+    //             + (R*/R) * [ n0[1] + n0[2]*(Tc,i/T) + n0[3]*ln(Tc,i/T)
+    //                        + n0[4]*ln|sinh(theta0[4]*Tc,i/T)|
+    //                        + n0[6]*ln|sinh(theta0[6]*Tc,i/T)|
+    //                        - n0[5]*ln|cosh(theta0[5]*Tc,i/T)|
+    //                        - n0[7]*ln|cosh(theta0[7]*Tc,i/T)| ]
+    //
+    // Three things have to line up, and two of them are invisible in p, c_v
+    // and w -- they show up only in h and s.
+    //
+    // 1. SIGN.  IdealHelmholtzGERG2004Sinh accumulates +n[i]*log|sinh(...)|
+    //    and IdealHelmholtzGERG2004Cosh accumulates -n[i]*log|cosh(...)|
+    //    (src/Helmholtz.cpp:1260-1341): the minus in front of the two cosh
+    //    terms above is applied by the TERM, not carried in the coefficient.
+    //    So all four of n0[4..7] go in exactly as stored, un-negated.  Some
+    //    published n0 are themselves negative (methane's n0[7] is -4.46921);
+    //    "as published" is the rule, not "positive".
+    //
+    // 2. R*/R.  CoolProp's terms know nothing about it, so it is applied here
+    //    to the WHOLE bracket, i.e. to all seven of n0[1..7].  It must NOT
+    //    touch the ln(rho/rho_c) term -- and it does not, because that term is
+    //    generated by IdealHelmholtzLead as an unscaled log(delta) alongside
+    //    a1 + a2*tau (Helmholtz.cpp:1083-1093).  n0[1] and n0[2] as returned
+    //    by get_alphaig_coeffs were re-solved on exactly this basis, so they
+    //    stay consistent under the uniform scaling.
+    //
+    // 3. Tc-vs-T_red.  RESOLVING the question task-4-report.md left open (its
+    //    point 4): NO Tc/T_red folding is applied to n0[2]/n0[3] here,
+    //    because CoolProp already does it, and doing it again would
+    //    double-apply.  Read HelmholtzEOSMixtureBackend::calc_alpha0_deriv_nocache:
+    //
+    //      * pure branch (HelmholtzEOSMixtureBackend.cpp:3586-3600) evaluates
+    //        the terms at taustar = Tc/Tr * tau == Tc/T, having first called
+    //        E.alpha0.set_Tred(Tc) with the COMPONENT's Tc;
+    //      * mixture branch (:3636-3644) evaluates component i's terms at
+    //        tau_i = T_ci * tau / Tr == Tc,i/T, with T_ci read from
+    //        iT_critical.
+    //
+    //    In BOTH branches the argument handed to alpha0 is the component's own
+    //    Tc,i/T -- never Tr/T.  So IdealHelmholtzLead(a1, a2) already yields
+    //    n0[1] + n0[2]*Tc,i/T and IdealHelmholtzLogTau(a1) already yields
+    //    n0[3]*ln(Tc,i/T), for pure fluids AND for mixtures, with the raw
+    //    coefficients.  Folding Tc/T_red into n0[2] and adding
+    //    n0[3]*ln(Tc/T_red) would apply the rescale a second time.
+    //
+    //    The residual risk moves to the sinh/cosh terms, and it is a MIXTURE
+    //    risk only.  Those terms compute t = Tc_ctor/T_red internally and
+    //    evaluate at t*tau_arg.  On the pure branch T_red is set to the
+    //    component Tc, so t == 1 and t*taustar == theta*Tc/T: correct, which
+    //    is why passing info.Tc_K as the constructor's Tc below is right here.
+    //    On the mixture branch the base class calls set_Tred(Tr) while still
+    //    passing tau_i = Tc,i/T, which leaves an extra factor Tc,i/Tr in the
+    //    argument.  Task 9 must therefore make the T_red seen by these two
+    //    terms equal the COMPONENT's Tc (not the mixture Tr) -- e.g. by
+    //    overriding calc_alpha0_deriv_nocache / calc_all_alpha0_derivs_nocache
+    //    in GERGMixtureBackend -- and must verify it against
+    //    reference::mix_points_* h/s (or alphaig) at a composition where
+    //    Tr differs from every component Tc.  Only a mixture test can settle
+    //    it; no pure-fluid test in this task can.
+    {
+        const double RR = RSTAR_GERG / R_GERG;
+
+        EOS.alpha0.Lead = IdealHelmholtzLead(RR * ac.n0[1], RR * ac.n0[2]);
+        EOS.alpha0.LogTau = IdealHelmholtzLogTau(RR * ac.n0[3]);
+
+        // AlphaigCoeffs vectors are length 8 and 1-based: n0[0] and
+        // theta0[0..3] are padding.  Never iterate from 0.
+        std::vector<CoolPropDbl> n_sinh, th_sinh, n_cosh, th_cosh;
+        for (const std::size_t k : {static_cast<std::size_t>(4), static_cast<std::size_t>(6)}) {
+            // Guard on n0, exactly as teqp's recalc_integration_constants
+            // does: helium and argon have all four of n0[4..7] AND all four
+            // theta0 zero, and an unguarded n*log|sinh(0*tau)| would be
+            // 0*(-inf) == NaN rather than 0.
+            if (ac.n0[k] != 0.0) {
+                n_sinh.push_back(ac.n0[k] * RR);
+                th_sinh.push_back(ac.theta0[k]);
+            }
+        }
+        for (const std::size_t k : {static_cast<std::size_t>(5), static_cast<std::size_t>(7)}) {
+            if (ac.n0[k] != 0.0) {
+                n_cosh.push_back(ac.n0[k] * RR);
+                th_cosh.push_back(ac.theta0[k]);
+            }
+        }
+        if (!n_sinh.empty()) {
+            EOS.alpha0.GERG2004Sinh = IdealHelmholtzGERG2004Sinh(n_sinh, th_sinh, info.Tc_K);
+        }
+        if (!n_cosh.empty()) {
+            EOS.alpha0.GERG2004Cosh = IdealHelmholtzGERG2004Cosh(n_cosh, th_cosh, info.Tc_K);
+        }
+    }
+
+    EOS.validate();
+    return fluid;
 }
 
 }  // namespace GERG

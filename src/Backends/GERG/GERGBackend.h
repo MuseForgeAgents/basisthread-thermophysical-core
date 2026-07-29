@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "../Helmholtz/HelmholtzEOSMixtureBackend.h"
+#include "CoolProp/CoolPropFluid.h"
 #include "CoolProp/DataStructures.h"
 #include "GERGData.h"
 
@@ -14,6 +15,24 @@ namespace CoolProp {
 /// GERGData.h (CoolProp::GERG::GERGModel); aliased here so backend code can
 /// keep referring to it as CoolProp::GERGModel.
 using GERGModel = GERG::GERGModel;
+
+namespace GERG {
+
+/// Assemble a CoolPropFluid carrying ONLY the published GERG parameters for
+/// one component: the residual Helmholtz terms of Table A3.2, the ideal-gas
+/// terms of Table A3.1, the reducing state of Table A3.5, and R = 8.314472
+/// J/mol/K.  Nothing is taken from CoolProp's own fluid library -- the name is
+/// used purely as a table key -- so a GERG backend can never silently mix a
+/// CoolProp EOS into a GERG calculation.
+///
+/// The ideal-gas wiring is the delicate part; see the long comment on the
+/// definition in GERGBackend.cpp for the sign, R*/R and Tc-vs-T_red contract.
+///
+/// @param model      Which GERG model's tables to read
+/// @param gerg_name  A GERG component name (as returned by resolve_component)
+CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name);
+
+}  // namespace GERG
 
 /**
  * \brief Strict GERG-2004 / GERG-2008 backend.

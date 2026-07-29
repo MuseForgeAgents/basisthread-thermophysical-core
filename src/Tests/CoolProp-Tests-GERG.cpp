@@ -4,6 +4,8 @@
 
 #    include <cmath>
 #    include <iterator>
+#    include <memory>
+#    include <string>
 
 #    include "CoolProp/AbstractState.h"
 #    include "CoolProp/DataStructures.h"
@@ -21,15 +23,8 @@ TEST_CASE("GERG backend families are registered", "[GERG]") {
     CHECK(f1 == GERG2008_BACKEND_FAMILY);
 }
 
-TEST_CASE("GERG factory reaches the GERG backend", "[GERG]") {
-    // Task 1 ships a skeleton whose constructor throws NotImplementedError.
-    // The point of this test is that we get THAT exception, proving dispatch
-    // works, rather than a ValueError about an unknown backend.
-    CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}), NotImplementedError);
-    CHECK_THROWS_AS(AbstractState::factory("GERG2004", std::vector<std::string>{"Methane"}), NotImplementedError);
-}
-
 #    include "../Backends/GERG/GERGData.h"
+#    include "../Backends/GERG/GERGReferenceValues.h"
 
 using namespace CoolProp::GERG;
 
@@ -436,6 +431,139 @@ TEST_CASE("GERG departure_Npower does not throw when every term is polynomial", 
     std::size_t np = 0;
     CHECK_NOTHROW(np = departure_Npower(dc));
     CHECK(np == dc.n.size());
+}
+
+// ###########################################################################
+// Task 8: the ASSEMBLED pure-fluid equation of state against teqp.
+//
+// Everything above this line compares CoolProp's coefficient TABLES against
+// the monograph.  Everything below compares CoolProp's assembled EOS against
+// teqp's NUMBERS (src/Backends/GERG/GERGReferenceValues.h), which is the only
+// thing that can catch a wiring error -- a swapped exponent vector, a missing
+// R*/R, a negated cosh coefficient.
+// ###########################################################################
+
+namespace {
+
+/// Per-FIELD comparison tally.  GERGReferenceValues.h nulls fields
+/// independently (a row can have finite p and c_v but NaN w), so a NaN must
+/// skip that ONE comparison, never the whole row.  Counting both halves and
+/// pinning the totals in the test below means a reference field that silently
+/// turns into a NaN shows up as a failing count rather than as a quietly
+/// weakened gate.
+struct RefTally
+{
+    std::size_t compared = 0;
+    std::size_t nan_skipped = 0;
+    std::size_t rows = 0;
+};
+
+/// Compare one field, or record that the reference value is NaN.
+/// `computed` is only evaluated when the reference field is finite -- some of
+/// the NaN'd fields (w on the mechanically unstable branch) correspond to
+/// states where CoolProp's own evaluation is meaningless too.
+template <typename F>
+void check_field(double reference, F&& computed, double rel_tol, RefTally& tally) {
+    if (std::isnan(reference)) {
+        ++tally.nan_skipped;
+        return;
+    }
+    ++tally.compared;
+    CHECK_THAT(static_cast<double>(computed()), Catch::Matchers::WithinRel(reference, rel_tol));
+}
+
+void compare_pure_points(const std::string& backend, const std::vector<CoolProp::GERG::reference::PureRefPoint>& points, RefTally& tally) {
+    std::shared_ptr<CoolProp::AbstractState> AS;
+    std::string current_name;
+    for (const auto& pt : points) {
+        if (AS == nullptr || current_name != pt.name) {
+            current_name = pt.name;
+            AS.reset(CoolProp::AbstractState::factory(backend, std::vector<std::string>{current_name}));
+            // The reference grid deliberately includes states inside the
+            // two-phase dome (T = 0.7*Tc, rho = 0.5*rhoc gives p < 0 for most
+            // components).  teqp evaluates the single-phase EOS there
+            // analytically; imposing a phase makes CoolProp do the same
+            // instead of trying to run a saturation solver the GERG backend
+            // has no ancillary equations for.
+            AS->specify_phase(CoolProp::iphase_gas);
+        }
+        CAPTURE(backend, pt.name, pt.T_K, pt.rhomolar);
+        AS->update(CoolProp::DmolarT_INPUTS, pt.rhomolar, pt.T_K);
+        ++tally.rows;
+
+        // alphar and alphaig are the two halves of the EOS in isolation.
+        // alphaig is the ONLY assertion here that can see a wrong ideal-gas
+        // integration constant, a missing R*/R or a negated cosh coefficient:
+        // p, c_v and w are all blind to those.
+        check_field(pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
+        check_field(pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
+        check_field(pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
+        check_field(pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
+        check_field(pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("GERG pure fluids reproduce teqp", "[GERG]") {
+    using namespace CoolProp::GERG::reference;
+
+    RefTally t2004;
+    compare_pure_points("GERG2004", pure_points_2004, t2004);
+    // 18 GERG-2004 components x 16 (T, rho) grid points, 5 fields each.
+    // 23 of the 288 w values are NaN (mechanically unstable branch); no
+    // alphar/alphaig/p/cv value is.
+    CHECK(t2004.rows == 288);
+    CHECK(t2004.nan_skipped == 23);
+    CHECK(t2004.compared == 288 * 5 - 23);
+
+    RefTally t2008;
+    compare_pure_points("GERG2008", pure_points_2008, t2008);
+    // 21 GERG-2008 components x 16 grid points; 27 NaN w values.
+    CHECK(t2008.rows == 336);
+    CHECK(t2008.nan_skipped == 27);
+    CHECK(t2008.compared == 336 * 5 - 27);
+}
+
+TEST_CASE("GERG pure fluid uses the GERG gas constant and reducing state", "[GERG]") {
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    // R, not R* (8.314510) and not CoolProp's own per-fluid gas constant.
+    CHECK_THAT(AS->gas_constant(), Catch::Matchers::WithinRel(8.314472, 1e-14));
+    CHECK_THAT(AS->T_reducing(), Catch::Matchers::WithinRel(190.564, 1e-12));
+    CHECK_THAT(AS->rhomolar_reducing(), Catch::Matchers::WithinRel(10.139342719e3, 1e-12));
+    CHECK_THAT(AS->molar_mass(), Catch::Matchers::WithinRel(16.042460e-3, 1e-12));
+
+    // The GERG tables, not CoolProp's fluid library: CoolProp's own methane
+    // EOS reduces at 190.564 K but 10139.128 mol/m^3, and uses R = 8.3144598.
+    std::shared_ptr<AbstractState> HEOS(AbstractState::factory("HEOS", std::vector<std::string>{"Methane"}));
+    CHECK(std::abs(HEOS->rhomolar_reducing() - AS->rhomolar_reducing()) > 1e-3);
+}
+
+TEST_CASE("GERG pure fluid reference state gives h = s = 0 for the ideal gas", "[GERG]") {
+    // Consistency check on the whole assembled ideal-gas path, not just the
+    // coefficient solve tested in Task 4: this goes through
+    // calc_alpha0_deriv_nocache, so it also pins the Tc-vs-T_red convention
+    // and the R*/R placement on the pure branch.
+    const double T0 = 298.15, p0 = 101325.0;
+    const double rho0 = p0 / (8.314472 * T0);
+    for (const auto& model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        const std::string backend = (model == GERGModel::GERG_2004) ? "GERG2004" : "GERG2008";
+        for (const auto& name : component_names(model)) {
+            CAPTURE(backend, name);
+            std::shared_ptr<AbstractState> AS(AbstractState::factory(backend, std::vector<std::string>{name}));
+            AS->specify_phase(iphase_gas);
+            AS->update(DmolarT_INPUTS, rho0, T0);
+            // h_ig/(R T) = 1 + tau*dalpha0_dtau and s_ig/R = tau*dalpha0_dtau - alpha0.
+            const double h_ig_over_RT = 1 + AS->tau() * AS->dalpha0_dTau();
+            const double s_ig_over_R = AS->tau() * AS->dalpha0_dTau() - AS->alpha0();
+            CHECK_THAT(h_ig_over_RT, Catch::Matchers::WithinAbs(0.0, 1e-8));
+            CHECK_THAT(s_ig_over_R, Catch::Matchers::WithinAbs(0.0, 1e-8));
+        }
+    }
+}
+
+TEST_CASE("GERG backend rejects an empty component list", "[GERG]") {
+    CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{}), CoolProp::ValueError);
 }
 
 #endif /* ENABLE_CATCH */
