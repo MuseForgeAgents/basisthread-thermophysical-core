@@ -201,7 +201,15 @@ a pure offset in `alpha^0` and does not alter the model.
 | `set_binary_interaction_double` and friends | throw |
 | `viscosity()`, `conductivity()`, `surface_tension()` | throw `NotImplementedError` |
 | Superancillary | none attached |
-| Range | EOS limits set to GERG's extended range (60-700 K, p <= 70 MPa), enforced by CoolProp's existing limits machinery |
+| Range | EOS limits set to GERG's extended range (60-700 K, p <= 70 MPa), enforced by a `GERGMixtureBackend::update()` override |
+
+*(Corrected 2026-07-29.)*  This row originally said "enforced by CoolProp's
+existing limits machinery".  That was false and would have shipped a
+fail-open guard: `PT_flash` never compares `T` against `Tmax` at all, so the
+upper bound was unenforced, and the lower bound only appeared to work through
+an unrelated missing-ancillary accident.  The backend therefore carries its
+own `update()` override with a real range check.  Note `update_with_guesses`
+does not yet route through it — a known gap.
 
 Mutating beta, gamma, or `F_ij` and still calling the result GERG is a category
 error, so the setters throw rather than silently producing a mutant model.
