@@ -4,7 +4,9 @@
 
 #    include <cmath>
 #    include <iterator>
+#    include <map>
 #    include <memory>
+#    include <stdexcept>
 #    include <string>
 
 #    include "CoolProp/AbstractState.h"
@@ -496,6 +498,27 @@ struct RefTally
     std::size_t nan_skipped_p = 0;
     std::size_t nan_skipped_cvmolar = 0;
     std::size_t nan_skipped_w = 0;
+
+    /// Resolve a field label to ITS OWN counter, so `check_field` cannot be
+    /// called with a label/counter pair that disagree -- task-10 review round
+    /// 2: the previous signature took the counter as a separate `size_t&`
+    /// parameter, and nothing stopped a call site from passing
+    /// `nan_skipped_w` alongside the label `"p"`. All 10 call sites happened
+    /// to be correct, but the mismatch was representable. Routing every
+    /// increment through this single label-keyed lookup makes it not: there
+    /// is exactly one counter reachable from a given label, full stop.
+    std::size_t& nan_counter_for(const std::string& label) {
+        static const std::map<std::string, std::size_t RefTally::*> table = {
+          {"alphar", &RefTally::nan_skipped_alphar}, {"alphaig", &RefTally::nan_skipped_alphaig},
+          {"p", &RefTally::nan_skipped_p},           {"cvmolar", &RefTally::nan_skipped_cvmolar},
+          {"w", &RefTally::nan_skipped_w},
+        };
+        auto it = table.find(label);
+        if (it == table.end()) {
+            throw std::logic_error(std::string("check_field: no NaN counter registered for field [") + label + "]");
+        }
+        return this->*(it->second);
+    }
 };
 
 /// Compare one field, or record that the reference value is NaN.
@@ -508,15 +531,14 @@ struct RefTally
 /// the surrounding CAPTURE carries only backend/name/T/rho.  Without the label
 /// a failure cannot be attributed to a field, which is exactly the information
 /// needed to localize a regression (an alphaig-only failure means the
-/// ideal-gas constants; a p-only failure means R_u; and so on).
-///
-/// `nan_counter` is the PER-FIELD counter (tally.nan_skipped_w, etc) the
-/// caller selects -- see the RefTally comment above for why the total alone
-/// is not enough.
+/// ideal-gas constants; a p-only failure means R_u; and so on). `label` is
+/// now ALSO what selects the NaN counter (via `tally.nan_counter_for`), so
+/// there is only one string to keep in sync, not a string plus a separately-
+/// chosen counter reference.
 template <typename F>
-void check_field(const char* label, double reference, F&& computed, double rel_tol, std::size_t& nan_counter, RefTally& tally) {
+void check_field(const char* label, double reference, F&& computed, double rel_tol, RefTally& tally) {
     if (std::isnan(reference)) {
-        ++nan_counter;
+        ++tally.nan_counter_for(label);
         return;
     }
     ++tally.compared;
@@ -547,11 +569,11 @@ void compare_pure_points(const std::string& backend, const std::vector<CoolProp:
         // alphaig is the ONLY assertion here that can see a wrong ideal-gas
         // integration constant, a missing R*/R or a negated cosh coefficient:
         // p, c_v and w are all blind to those.
-        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally.nan_skipped_alphar, tally);
-        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally.nan_skipped_alphaig, tally);
-        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally.nan_skipped_p, tally);
-        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally.nan_skipped_cvmolar, tally);
-        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally.nan_skipped_w, tally);
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
     }
 }
 
@@ -611,11 +633,11 @@ void compare_mix_points(const std::string& backend, const std::vector<CoolProp::
         // the pure branch, and an error in it (e.g. the spurious Tc,i/Tr
         // factor the GERG2004Sinh/Cosh terms would introduce) moves alphaig
         // while leaving alphar and p exactly right.
-        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally.nan_skipped_alphar, tally);
-        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally.nan_skipped_alphaig, tally);
-        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally.nan_skipped_p, tally);
-        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally.nan_skipped_cvmolar, tally);
-        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally.nan_skipped_w, tally);
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
     }
 }
 
@@ -758,6 +780,32 @@ TEST_CASE("GERG limits are not self-contradictory", "[GERG]") {
             CHECK(AS->Tmax() >= AS->T_critical());
         }
     }
+}
+
+TEST_CASE("GERG mixture range is a mole-fraction-weighted average and can sit well below 60 K", "[GERG]") {
+    // check_gerg_range_of_validity (GERGBackend.cpp) enforces Tmin()/Tmax(),
+    // which for a MIXTURE resolve to HelmholtzEOSMixtureBackend::calc_Tmin/
+    // calc_Tmax (.cpp:1312) -- a plain mole-fraction-weighted average of each
+    // component's EOS.limits.Tmin/Tmax, not a re-derivation of "60 K unless
+    // below Tc." A 50/50 helium/methane mixture therefore has
+    // Tmin = 0.5*5.1953 + 0.5*60 = 32.60 K, well below the 60 K published for
+    // the mixture MODEL as a whole (Kunz & Wagner 2012 section 4.1) -- and
+    // that is ACCEPTED here as correct rather than patched: the published
+    // 60-700 K range is itself a statement about the mixture model in
+    // aggregate, individual light-component-rich mixtures extending the
+    // usable range below 60 K is consistent with how GERG's own reducing-
+    // temperature machinery already treats light components (see "GERG
+    // limits are not self-contradictory" above, same rationale one level up).
+    // Pinned here, precisely, rather than left as an unstated side effect of
+    // whatever calc_Tmin happens to compute.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"helium", "methane"}));
+    AS->set_mole_fractions(std::vector<CoolPropDbl>{0.5, 0.5});
+    CHECK_THAT(AS->Tmin(), Catch::Matchers::WithinRel(32.5977, 1e-4));
+
+    AS->specify_phase(iphase_gas);
+    CHECK_NOTHROW(AS->update(DmolarT_INPUTS, 5000.0, 45.0));   // 45 K: below 60 K, above this mixture's own Tmin -- accepted
+    CHECK_THROWS_AS(AS->update(DmolarT_INPUTS, 5000.0, 30.0),  // 30 K: below this mixture's own Tmin -- rejected
+                    CoolProp::OutOfRangeError);
 }
 
 TEST_CASE("GERG canonical-name fast path does not weaken model strictness", "[GERG]") {
@@ -1118,19 +1166,35 @@ TEST_CASE("GERG refuses binary interaction parameter mutation through every publ
     // would be caught here.
     CHECK_THROWS_AS(AS->apply_simple_mixing_rule(0, 1, "linear"), CoolProp::ValueError);
 
-    // Known, documented, NOT-closed bypass (task-10-brief.md hazard 2):
-    // `Reducing` is a PUBLIC member of HelmholtzEOSMixtureBackend
-    // (HelmholtzEOSMixtureBackend.h:147), so a caller holding a
-    // HelmholtzEOSMixtureBackend* can reach the reducing function directly
-    // and mutate it in place, bypassing every guard above. This is not a
-    // guard this backend can close (see GERGBackend.h for why) -- asserted
-    // here so the limitation is pinned rather than merely claimed in a
-    // comment: if `Reducing` were ever made non-public, or a GERG-specific
-    // ReducingFunction subclass were added that itself refuses mutation, this
-    // assertion would need to flip, which is the point.
+    // Known, documented, NOT-closed bypasses (task-10-brief.md hazard 2; full
+    // enumeration in GERGBackend.h). Both are a CHOICE not to close, not an
+    // impossibility -- see GERGBackend.h for the ConstantReducingFunction
+    // precedent that shows the route -- and both are pinned here (not just
+    // claimed in a comment) so a future change that closes or reopens them
+    // shows up as a test change:
+    //
+    // 1. `Reducing` is a PUBLIC member of HelmholtzEOSMixtureBackend
+    //    (HelmholtzEOSMixtureBackend.h:147); a caller holding a
+    //    HelmholtzEOSMixtureBackend* can reach the reducing function directly
+    //    and mutate it in place.
+    // 2. `residual_helmholtz` is equally public, and `Excess.F[i][j]` /
+    //    `Excess.DepartureFunctionMatrix[i][j]` are themselves public members
+    //    with no setter at all -- this is the identical "swap in a different
+    //    departure function" hazard the "function" guard above exists to
+    //    prevent, reached without going through any guarded setter.
     auto* heos = dynamic_cast<HelmholtzEOSMixtureBackend*>(AS.get());
     REQUIRE(heos != nullptr);
     CHECK_NOTHROW(heos->Reducing->set_binary_interaction_double(0, 1, "betaT", 1.1));
+    AS->set_mole_fractions(std::vector<CoolPropDbl>{0.4, 0.6});
+    AS->specify_phase(iphase_gas);
+    const double alphar_before = [&] {
+        AS->update(DmolarT_INPUTS, 5000.0, 200.0);
+        return AS->alphar();
+    }();
+    heos->residual_helmholtz->Excess.F[0][1] = 0.0;
+    heos->residual_helmholtz->Excess.F[1][0] = 0.0;
+    AS->update(DmolarT_INPUTS, 5000.0, 200.0);
+    CHECK(AS->alphar() != alphar_before);  // silently changed the mixture's alphar with no error
 }
 
 TEST_CASE("GERG fluids carry no superancillary", "[GERG]") {
@@ -1149,8 +1213,8 @@ TEST_CASE("GERG fluids carry no superancillary", "[GERG]") {
 }
 
 TEST_CASE("GERG respects its range of validity", "[GERG]") {
-    // The range guard is CoolProp's ordinary EOS.limits.Tmin/Tmax machinery
-    // (make_gerg_fluid, GERGBackend.cpp), gated behind the
+    // The range guard is GERGMixtureBackend::check_gerg_range_of_validity,
+    // called from the update() override -- gated behind the
     // DONT_CHECK_PROPERTY_LIMITS configuration key (default false -- checks
     // ARE performed). Asserted explicitly here (task-10-brief.md hazard 4)
     // rather than merely assumed, so this test cannot pass only because some
@@ -1158,8 +1222,58 @@ TEST_CASE("GERG respects its range of validity", "[GERG]") {
     REQUIRE(CoolProp::get_config_bool(DONT_CHECK_PROPERTY_LIMITS) == false);
 
     std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
-    CHECK_THROWS(AS->update(PT_INPUTS, 1e5, 40.0));   // below Tmin = 60 K
-    CHECK_THROWS(AS->update(PT_INPUTS, 1e5, 900.0));  // above Tmax = 700 K
+    // Original review round of this test used bare CHECK_THROWS at (1e5, 40.0)
+    // / (1e5, 900.0) with no imposed phase. That PASSED even with the guard's
+    // lower bound deleted entirely (`if (_T > Thi)` instead of
+    // `if (_T < Tlo || _T > Thi)`): at 40 K with no phase imposed, PT_flash's
+    // phase determination lands in solver_rho_Tp's LIQUID branch, which calls
+    // components[0].ancillaries.rhoL.evaluate(T) on an ancillary GERG fluids
+    // never populate -- the exact missing-ancillary accident documented on
+    // the `update` override and in task-10-report.md section 5(b) -- so the
+    // "below Tmin" case was throwing for a reason that had nothing to do with
+    // check_gerg_range_of_validity, and a bare CHECK_THROWS could not tell the
+    // difference. Forcing iphase_gas routes both calls through solver_rho_Tp's
+    // ideal-gas-guess branch instead, which does not itself throw at either
+    // bound, so only the explicit T check can make these throw -- and
+    // CHECK_THROWS_AS pins the exact exception type so a differently-thrown
+    // error (e.g. the ancillary accident, or the p<0 catch-all) cannot be
+    // mistaken for this guard either.
+    AS->specify_phase(iphase_gas);
+    CHECK_THROWS_AS(AS->update(PT_INPUTS, 1e3, 59.0), CoolProp::OutOfRangeError);   // below Tmin = 60 K
+    CHECK_THROWS_AS(AS->update(PT_INPUTS, 1e5, 701.0), CoolProp::OutOfRangeError);  // above Tmax = 700 K
+}
+
+TEST_CASE("GERG closes change_EOS and update_with_guesses; downcast-only bypasses stay open and pinned", "[GERG]") {
+    // Task-10 review round 2: change_EOS and update_with_guesses are both
+    // virtual on AbstractState itself, so both are reachable from a plain
+    // AbstractState* with NO downcast -- the exact shape AbstractState::factory
+    // hands back -- and both were confirmed live to accept out-of-model input
+    // before these overrides existed (change_EOS installed an SRK cubic;
+    // update_with_guesses accepted T = 900 K). Closed here rather than left
+    // open or merely documented, per the review.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    CHECK_THROWS_AS(AS->change_EOS(0, "SRK"), CoolProp::ValueError);
+    CHECK_THROWS_AS(AS->change_EOS(0, "Peng-Robinson"), CoolProp::ValueError);
+
+    GuessesStructure guess;
+    guess.rhomolar = 1e5 / (AS->gas_constant() * 900.0);  // ideal-gas guess, so the failure is the range guard, not a bad initial guess
+    CHECK_THROWS_AS(AS->update_with_guesses(PT_INPUTS, 1e5, 900.0, guess), CoolProp::OutOfRangeError);
+
+    // Known, documented, NOT-closed bypasses that DO require a downcast --
+    // pinned here (not just asserted in a comment) so a future change that
+    // closes or reopens them shows up as a test change, not a silent drift.
+    // These are deliberately weaker exposure than the two above: reaching
+    // them needs source code that already knows it holds a concrete
+    // HelmholtzEOSMixtureBackend-family object, not merely an AbstractState.
+    auto* heos = dynamic_cast<HelmholtzEOSMixtureBackend*>(AS.get());
+    REQUIRE(heos != nullptr);
+    CHECK_NOTHROW(heos->update_DmolarT_direct(5000.0, 900.0));  // T = 900 K, well above Tmax = 700 K
+    CHECK_NOTHROW(heos->update_TP_guessrho(900.0, 1e5, 1e5 / (8.314472 * 900.0)));
+    CHECK_NOTHROW(heos->update_TDmolarP_unchecked(900.0, 5000.0, 1e5));
+
+    // The other documented-but-not-closed bypasses (Reducing, residual_helmholtz->Excess)
+    // are pinned in "GERG refuses binary interaction parameter mutation through
+    // every public route" above.
 }
 
 #endif /* ENABLE_CATCH */

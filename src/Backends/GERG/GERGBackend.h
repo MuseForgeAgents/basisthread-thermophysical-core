@@ -95,6 +95,19 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
     /// post_update override here would never run.
     void update(CoolProp::input_pairs input_pair, double value1, double value2) override;
 
+    /// Same guard as `update` above, on the SEPARATE virtual entry point a
+    /// caller reaches by supplying an explicit `GuessesStructure`
+    /// (AbstractState.h:885, HelmholtzEOSMixtureBackend.h:397).  Task 10's
+    /// first review round left this open: it is virtual on `AbstractState`
+    /// itself, so it is reachable with NO downcast from the plain
+    /// `AbstractState*` the factory returns -- confirmed to accept T = 900 K
+    /// before this override existed.  Three lines, identical shape to
+    /// `update`: run the inherited flash, then apply the same range check.
+    void update_with_guesses(CoolProp::input_pairs input_pair, double value1, double value2, const GuessesStructure& guesses) override {
+        HelmholtzEOSMixtureBackend::update_with_guesses(input_pair, value1, value2, guesses);
+        check_gerg_range_of_validity();
+    }
+
     /// GERG-2004/GERG-2008 publish no transport correlations at all -- there is
     /// nothing "GERG" a viscosity number could be checked against, unlike the
     /// residual/ideal-gas/reducing terms above.  HelmholtzEOSMixtureBackend's
@@ -124,6 +137,32 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
         throw NotImplementedError("Surface tension is not part of the GERG-2004/GERG-2008 models.");
     }
 
+    /// `AbstractState::change_EOS(i, name)` (AbstractState.h:1547) is a
+    /// non-virtual wrapper over this virtual hook (AbstractState.h:719) --
+    /// so it is reachable directly on a plain `AbstractState*`, no downcast
+    /// needed, MORE exposed than the `Reducing` bypass documented below.  It
+    /// violates model purity more severely than a BIP tweak too: the
+    /// inherited HelmholtzEOSMixtureBackend::calc_change_EOS
+    /// (HelmholtzEOSMixtureBackend.cpp:483) calls
+    /// `EOS.alphar.empty_the_EOS()` and installs an entirely different
+    /// residual model (SRK / Peng-Robinson / Xiang-Deiters cubic) in place of
+    /// the GERG residual term -- there would be nothing "GERG" left in the
+    /// EOS at all.
+    ///
+    /// Found during task-10 review only working BY ACCIDENT today: GERG
+    /// fluids leave `EOS.reduce.p` unset (`make_gerg_fluid` sets it, but the
+    /// cubic path reads `EOS.reduce.p` fresh off whatever component is
+    /// stored, and for a component whose critical pressure was never filled
+    /// in the same way CoolProp's own library fills it, the cubic ends up
+    /// with a NaN pc), so the very next `update()` throws "p is not a valid
+    /// number" -- the identical class of missing-data accident this task
+    /// refused to rely on for the T-below-Tmin case (see check_gerg_range_of_validity).
+    /// Closed explicitly here instead, rather than left to that accident.
+    void calc_change_EOS(const std::size_t, const std::string&) override {
+        throw ValueError("GERG fluids' equation of state is fixed by the published model and cannot be replaced. "
+                         "Use the HEOS or cubic backends directly if you want a different EOS.");
+    }
+
    public:
     /// GERG's betas/gammas and departure functions are the published model,
     /// not a fit that a caller is meant to adjust -- set_mixture_parameters
@@ -149,18 +188,62 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
     /// virtual dispatch already sends that call to the override below
     /// whenever `this` is a GERGMixtureBackend.
     ///
-    /// Known bypass NOT closed by this override, and not closeable at this
-    /// layer: `Reducing` (HelmholtzEOSMixtureBackend.h:147) is a PUBLIC
-    /// shared_ptr<ReducingFunction>.  A caller with a
-    /// GERGMixtureBackend*/HelmholtzEOSMixtureBackend* can do
-    /// `heos->Reducing->set_binary_interaction_double(i, j, param, value)`
-    /// directly and mutate the GERG2008ReducingFunction in place, bypassing
-    /// every guard here entirely.  Closing that would mean making `Reducing`
-    /// (and `residual_helmholtz`, `SatL`, `SatV`, and most of this class's
-    /// state -- see the `public:` section spanning
-    /// HelmholtzEOSMixtureBackend.h:119-704) non-public on the shared base
-    /// class, which is out of scope for a single backend.  Documented here
-    /// as a known limitation per task-10-brief.md hazard 2, not hidden.
+    /// ==================================================================
+    /// KNOWN BYPASSES.  Full enumeration, task-10 review round 2.  Two tiers:
+    /// reachable from a plain `AbstractState*` with NO downcast (the shape
+    /// the factory hands back and the only one a strictness claim about
+    /// "GERG cannot be mutated" can honestly ignore), and reachable only by
+    /// downcasting to `HelmholtzEOSMixtureBackend*` or reaching through a
+    /// public data member (a much narrower, opt-in exposure).
+    ///
+    /// NOT closed, NO downcast required:
+    ///
+    /// * `Reducing` (HelmholtzEOSMixtureBackend.h:147) is a PUBLIC
+    ///   shared_ptr<ReducingFunction> data member.  A caller with a
+    ///   GERGMixtureBackend*/HelmholtzEOSMixtureBackend* can do
+    ///   `heos->Reducing->set_binary_interaction_double(i, j, param, value)`
+    ///   directly and mutate the GERG2008ReducingFunction in place, bypassing
+    ///   every guard above entirely.  This is a CHOICE not to close, not an
+    ///   impossibility: `ConstantReducingFunction::set_binary_interaction_double`
+    ///   (ReducingFunctions.h:558, `{ return; }`) already establishes the
+    ///   pattern of a ReducingFunction subclass that refuses mutation itself,
+    ///   so a GERG-specific ReducingFunction wrapper that overrides
+    ///   set_binary_interaction_double to throw would close this route
+    ///   without touching HelmholtzEOSMixtureBackend at all. Not built here:
+    ///   it is a second class (wrapping or subclassing GERG2008ReducingFunction)
+    ///   for one hard-to-reach hole, and `residual_helmholtz` below has the
+    ///   identical problem and would need the identical treatment, doubling
+    ///   the scope.  Left as a documented, tested (CHECK_NOTHROW) limitation.
+    /// * `residual_helmholtz` (HelmholtzEOSMixtureBackend.h:148) is equally
+    ///   public, and `residual_helmholtz->Excess.F[i][j]` /
+    ///   `.DepartureFunctionMatrix[i][j]` are themselves public members of
+    ///   `ExcessTerm` (ExcessHEFunction.h) with no setter to intercept at all
+    ///   -- confirmed live: `h->residual_helmholtz->Excess.F[0][1] = 0` on
+    ///   GERG2008 Methane/Nitrogen changes alphar (-0.259933 -> -0.257183)
+    ///   with no error.  This is the exact class of silent substitution the
+    ///   sanctioned `set_binary_interaction_string(..., "function", ...)`
+    ///   guard above exists to prevent -- reachable here without going
+    ///   through any setter whatsoever.  Same "known limitation, not hidden"
+    ///   treatment as `Reducing`.
+    ///
+    /// CLOSED by this task (round 2): `AbstractState::change_EOS` (see
+    /// calc_change_EOS override above) and `update_with_guesses` (see
+    /// override above) were BOTH reachable with no downcast and are now
+    /// guarded.
+    ///
+    /// NOT closed, downcast to HelmholtzEOSMixtureBackend* REQUIRED (a much
+    /// narrower exposure -- documented, not contorted around): `update_TP_guessrho`,
+    /// `update_DmolarT_direct` (confirmed live: accepts T = 900 K, returns
+    /// p = 4.29e7 Pa with no error), and `update_TDmolarP_unchecked`
+    /// (HelmholtzEOSMixtureBackend.h:408-410) are public, non-virtual, and
+    /// not declared anywhere on `AbstractState` -- so calling any of them
+    /// needs source code that already knows it is holding a GERG/HEOS-family
+    /// object, not merely an `AbstractState`.  Overriding them individually
+    /// would mean re-deriving three separate flash entry points' worth of
+    /// range-check plumbing for a caller sophistication level ("I have
+    /// downcast to the concrete backend type") that has already opted out of
+    /// the ordinary public API's guarantees.
+    /// ==================================================================
     void set_binary_interaction_double(const std::size_t, const std::size_t, const std::string&, const double) override {
         throw ValueError("GERG binary interaction parameters are fixed by the published model and cannot be modified. A mixture with altered "
                          "beta/gamma is not GERG.");
