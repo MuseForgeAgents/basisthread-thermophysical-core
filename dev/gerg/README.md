@@ -100,6 +100,7 @@ pure_points_2004: 288 emitted (18 fluids x 16 grid pts, floor 14/16 finite alpha
 pure_points_2008: 336 emitted (21 fluids x 16 grid pts, floor 14/16 finite alphar enforced per fluid), NaN'd-field counts: alphar=0, alphaig=0, p=0, cv=0, w=27
 mix_points_2004 (binary pairs only): 153 of 153 expected emitted (assert enforced), 19 with w = NaN
 mix_points_2008 (binary pairs + AGA8): 397 emitted (210 of 210 expected pairs + 187 of 187 expected AGA8 gases, both counts assert-enforced), 40 pairs with w = NaN, 0 AGA8 with w = NaN
+Mixture alphar/alphaig: 0 NaN on every emitted row of both vectors (assert-enforced). w is the ONLY mixture column that is ever NaN, so Task 9's per-field skip may fire on w and on nothing else.
 AGA8 p_teqp vs validation_data.P_MPa: worst 6.770e-04 (gas 193), median 3.514e-12 ...
 ```
 
@@ -111,6 +112,8 @@ emitting a short header, if any of the following don't hold exactly:
 - `len(mix_points_2004)` (binary pairs) `== 153` (`C(18,2)`)
 - binary pairs in `mix_points_2008 == 210` (`C(21,2)`)
 - AGA8 rows emitted `== len(VALIDATION_DATA) == 187`
+- **every** emitted mixture row has a finite `alphar` *and* a finite
+  `alphaig` (`nanalpha_*` / `aga8_nanalpha` must all be empty)
 
 Why this matters more here than almost anywhere else in this backend: the
 Task 5 review established that a single mistyped digit in one of the 225
@@ -249,10 +252,12 @@ struct PureRefPoint {
 struct MixRefPoint {
     std::vector<const char*> names;  // parallel to z -- component order is AGA8 order for
     std::vector<double> z;           // AGA8 rows, GERGData.h component_names() order for pair rows
-    double T_K, rhomolar, p_Pa, cvmolar, w;  // w may independently be NaN (see below); p_Pa/cvmolar
-                                              // are never NaN in the current data (see the pure-fluid
-                                              // note below for why the same guarantee does NOT extend
-                                              // to PureRefPoint's alphar/alphaig/p_Pa/cvmolar in general)
+    double T_K, rhomolar, alphar, alphaig, p_Pa, cvmolar, w;
+    // w may independently be NaN (see below).  alphar/alphaig/p_Pa/cvmolar are never NaN --
+    // for alphar/alphaig that is now assert-enforced at generation time, because those two
+    // columns are the ones Task 9's gate depends on and a NaN in them would be silently
+    // SKIPPED by the per-field comparison rather than failing.  (See the pure-fluid note
+    // below for why the same guarantee is not claimed for PureRefPoint in general.)
 };
 
 extern const std::vector<PureRefPoint> pure_points_2004, pure_points_2008;
@@ -260,6 +265,23 @@ extern const std::vector<MixRefPoint> mix_points_2004, mix_points_2008;
 
 }}}  // namespace CoolProp::GERG::reference
 ```
+
+**Why `MixRefPoint` carries `alphar`/`alphaig` (added in Task 9).** The
+struct originally had only `p_Pa`, `cvmolar` and `w`. Task 8's mutation
+ledger established that `alphaig` is the *only* instrument in this suite
+that can see an error in the ideal-gas integration constants below the
+`h = s = 0` reference-state test's `1e-8` absolute floor: a `1e-9` additive
+shift in `n0[1]` fails **624 `alphaig` assertions and nothing else** —
+`alphar`, `p_Pa`, `cvmolar` and `w` all stay clean. Task 9's central hazard
+(the mixture branch of `calc_alpha0_deriv_nocache` calling `set_Tred(Tr)`
+while passing `tau_i = Tc_i/T`) is an ideal-gas error that *only* mixtures
+expose, so without a mixture `alphaig` column the Task 9 gate could not see
+the very bug it was written to catch. Re-running that same `n0[1] += 1e-9`
+mutation with the column in place now fails **1174** assertions, every one
+of them `alphaig`: 624 pure + 550 mixture. `alphar` was added alongside it
+for symmetry with `PureRefPoint` and because it isolates the departure
+function from the gas constant — a wrong `R` moves `p`, `cvmolar` and `w`
+but leaves `alphar` exact.
 
 **Per-FIELD nulling, not per-row dropping (load-bearing contract for Tasks
 8-9).** Every field of both structs is computed and null'd to NaN

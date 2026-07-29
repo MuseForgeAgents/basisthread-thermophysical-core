@@ -4,9 +4,13 @@
 #include <cmath>
 #include <utility>
 
+#include <memory>
+
 #include "CoolProp/CoolProp.h"
 #include "CoolProp/Exceptions.h"
 #include "GERGData.h"
+#include "Backends/Helmholtz/ExcessHEFunction.h"
+#include "Backends/Helmholtz/ReducingFunctions.h"
 
 namespace CoolProp {
 
@@ -22,12 +26,163 @@ GERGMixtureBackend::GERGMixtureBackend(GERGModel model, const std::vector<std::s
         // reach make_gerg_fluid.
         fluids.push_back(GERG::make_gerg_fluid(model, GERG::resolve_component(model, user_name)));
     }
-    // For N == 1 this does NOT call set_mixture_parameters(); for N > 1 it
-    // does, and the GERG override of that lands in Task 9.
+    // m_model is initialised in the member-init list above, so it is already
+    // valid here; and the object's dynamic type is already GERGMixtureBackend
+    // inside this constructor BODY, so this dispatches to the override below
+    // (ordinary most-derived-overrider dispatch, not the constructor edge
+    // case that applies while base sub-objects are still being built).
     set_components(fluids);
     if (names.size() == 1) {
         set_mole_fractions(std::vector<CoolPropDbl>(1, 1.0));
     }
+}
+
+GERGMixtureBackend::GERGMixtureBackend(GERGModel model, const std::vector<CoolPropFluid>& fluids, bool generate_SatL_and_SatV) : m_model(model) {
+    set_components(fluids, generate_SatL_and_SatV);
+}
+
+void GERGMixtureBackend::set_components(const std::vector<CoolPropFluid>& comps, bool generate_SatL_and_SatV) {
+    // Build everything EXCEPT the linked saturation states.  The base
+    // implementation calls set_mixture_parameters() unqualified for N > 1, so
+    // that part reaches this class's override.
+    HelmholtzEOSMixtureBackend::set_components(comps, false);
+
+    if (!generate_SatL_and_SatV) {
+        return;
+    }
+    // Mirror HelmholtzEOSMixtureBackend::set_components' SatL/SatV block, but
+    // with GERG-typed states.  Constructing them with
+    // generate_SatL_and_SatV = false is what stops the recursion.
+    //
+    // linked_states is cleared first: the base block appends unconditionally,
+    // so calling set_components twice on one object would otherwise leave the
+    // superseded SatL/SatV in linked_states, where sync_linked_states would
+    // keep writing to them forever.  SatL/SatV are the only linked states that
+    // exist at this point (TPD_state/critical_state/transient_pure_state are
+    // created lazily, long after construction).
+    linked_states.clear();
+
+    SatL.reset(new GERGMixtureBackend(m_model, comps, false));
+    SatL->specify_phase(iphase_liquid);
+    linked_states.push_back(SatL);
+    SatL->clear();
+
+    SatV.reset(new GERGMixtureBackend(m_model, comps, false));
+    SatV->specify_phase(iphase_gas);
+    SatV->clear();
+    linked_states.push_back(SatV);
+}
+
+CoolPropDbl GERGMixtureBackend::calc_gas_constant() {
+    // See the declaration in GERGBackend.h: the inherited implementation
+    // returns the CODATA universal gas constant for any MIXTURE while
+    // NORMALIZE_GAS_CONSTANTS is set (CoolProp's default), which is not the R
+    // the GERG equation of state is written against.
+    return GERG::R_GERG;
+}
+
+HelmholtzEOSMixtureBackend* GERGMixtureBackend::get_copy(bool generate_SatL_and_SatV) {
+    auto* ptr = new GERGMixtureBackend(m_model, components, generate_SatL_and_SatV);
+    ptr->sync_linked_states(this);
+    return ptr;
+}
+
+void GERGMixtureBackend::set_mixture_parameters() {
+    // ####################################################################
+    // The reason this backend exists.
+    //
+    // HelmholtzEOSMixtureBackend::set_mixture_parameters delegates to
+    // MixtureParameters::set_mixture_parameters, which resolves every binary
+    // pair through CoolProp's GLOBAL binary-interaction-parameter library by
+    // CAS number.  Measured against dev/mixtures/mixture_binary_pairs.json in
+    // this tree (888 rows in total): all 210 GERG-2008 binary pairs ARE in
+    // that library, 194 of them as the Kunz-JCED-2012 row GERG publishes --
+    // but 16 as a LATER refit, 15 Gernert-Thesis-2013 and 1
+    // Tkaczuk-JPCRD-2020.  Twelve of those 16 shift the mixture reducing
+    // temperature by more than 0.03 K at z = (0.35, 0.65); four leave
+    // beta/gamma numerically unchanged but attach a DIFFERENT departure
+    // function.  Reaching this path from a backend named GERG2004/GERG2008
+    // would return entirely plausible numbers that are not GERG, with no
+    // error anywhere.  (Mutation-verified: forcing the inherited path, with a
+    // CAS written into each fluid so the lookup succeeds, fails 294 assertions
+    // -- 78 of them on alphar alone.)
+    //
+    // Everything below therefore comes from the GERG tables in GERGData.h /
+    // this file, keyed on the GERG component name that make_gerg_fluid stored
+    // in CoolPropFluid::name.  Note that make_gerg_fluid deliberately leaves
+    // CoolPropFluid::CAS empty, so if this override were ever bypassed the
+    // inherited path would throw rather than answer -- but that is a backstop,
+    // not the mechanism: see set_components above, which is what keeps the
+    // linked SatL/SatV states from taking the inherited path.
+    // ####################################################################
+    const std::vector<CoolPropFluid> comps = get_components();
+    const std::size_t N = comps.size();
+
+    STLMatrix beta_v(N, std::vector<CoolPropDbl>(N, 0));
+    STLMatrix gamma_v(N, std::vector<CoolPropDbl>(N, 0));
+    STLMatrix beta_T(N, std::vector<CoolPropDbl>(N, 0));
+    STLMatrix gamma_T(N, std::vector<CoolPropDbl>(N, 0));
+
+    residual_helmholtz->Excess.resize(N);
+
+    for (std::size_t i = 0; i < N; ++i) {
+        for (std::size_t j = i + 1; j < N; ++j) {
+            const std::string& f1 = comps[i].name;
+            const std::string& f2 = comps[j].name;
+
+            // get_betasgammas returns values already oriented for the (f1, f2)
+            // order asked for, so beta_*[i][j] takes them as-is.  The
+            // TRANSPOSED entry needs the reciprocal of the betas and the SAME
+            // gammas -- gamma_v/gamma_T are symmetric under exchange, the
+            // betas are not (GERGData.h, get_betasgammas' orientation note).
+            const GERG::BetasGammas bg = GERG::get_betasgammas(m_model, f1, f2);
+            beta_v[i][j] = bg.betaV;
+            beta_v[j][i] = 1.0 / bg.betaV;
+            gamma_v[i][j] = bg.gammaV;
+            gamma_v[j][i] = bg.gammaV;
+            beta_T[i][j] = bg.betaT;
+            beta_T[j][i] = 1.0 / bg.betaT;
+            gamma_T[i][j] = bg.gammaT;
+            gamma_T[j][i] = bg.gammaT;
+
+            double F = 0.0;
+            const bool has_departure = GERG::get_Fij(m_model, f1, f2, F);
+            residual_helmholtz->Excess.F[i][j] = has_departure ? F : 0.0;
+            residual_helmholtz->Excess.F[j][i] = residual_helmholtz->Excess.F[i][j];
+
+            DepartureFunctionPointer dep;
+            if (has_departure) {
+                const GERG::DepartureCoeffs dc = GERG::get_departurecoeffs(m_model, f1, f2);
+                // GERG2008DepartureFunction's parameter order is
+                // (n, d, t, eta, epsilon, beta, gamma, Npower) -- epsilon
+                // BEFORE beta/gamma, which is NOT the order DepartureCoeffs
+                // declares its members.  Every argument is therefore named
+                // explicitly here; a transposed pair compiles cleanly and is
+                // silently wrong.
+                dep =
+                  std::make_shared<GERG2008DepartureFunction>(dc.n, dc.d, dc.t, dc.eta, dc.epsilon, dc.beta, dc.gamma, GERG::departure_Npower(dc));
+            } else {
+                // Most GERG pairs have no departure function at all.  A null
+                // pointer here would be a latent segfault rather than a zero:
+                // ExcessTerm::update() dereferences EVERY off-diagonal entry
+                // (ExcessHEFunction.h:239-248) and ExcessTerm::copy() does too
+                // (:215-227), regardless of F being zero.  Install the same
+                // zero-valued placeholder MixtureParameters uses
+                // (MixtureParameters.cpp:629-634).
+                const std::vector<double> n(1, 0), d(1, 1), t(1, 1), l(1, 0);
+                dep = std::make_shared<ExponentialDepartureFunction>(n, d, t, l);
+            }
+            // alphar_ij == alphar_ji, and ExcessTerm::update calls
+            // update(tau, delta) on each entry with identical arguments, so
+            // sharing one instance across both slots is safe.
+            residual_helmholtz->Excess.DepartureFunctionMatrix[i][j] = dep;
+            residual_helmholtz->Excess.DepartureFunctionMatrix[j][i] = dep;
+        }
+    }
+
+    // GERG2008ReducingFunction reads pFluids[i].EOS().reduce.T / .rhomolar,
+    // which make_gerg_fluid sets from the GERG reducing state (Table A3.5).
+    Reducing = std::make_shared<GERG2008ReducingFunction>(comps, beta_v, gamma_v, beta_T, gamma_T);
 }
 
 namespace GERG {
@@ -1069,8 +1224,8 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
     //                        - n0[5]*ln|cosh(theta0[5]*Tc,i/T)|
     //                        - n0[7]*ln|cosh(theta0[7]*Tc,i/T)| ]
     //
-    // Three things have to line up, and two of them are invisible in p, c_v
-    // and w -- they show up only in h and s.
+    // Four things have to line up, and three of them are invisible in p, c_v
+    // and w -- they show up only in h and s (equivalently, in alphaig).
     //
     // 1. SIGN.  IdealHelmholtzGERG2004Sinh accumulates +n[i]*log|sinh(...)|
     //    and IdealHelmholtzGERG2004Cosh accumulates -n[i]*log|cosh(...)|
@@ -1107,50 +1262,98 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
     //    coefficients.  Folding Tc/T_red into n0[2] and adding
     //    n0[3]*ln(Tc/T_red) would apply the rescale a second time.
     //
-    //    The residual risk moves to the sinh/cosh terms, and it is a MIXTURE
-    //    risk only.  Those terms compute t = Tc_ctor/T_red internally and
-    //    evaluate at t*tau_arg.  On the pure branch T_red is set to the
-    //    component Tc, so t == 1 and t*taustar == theta*Tc/T: correct, which
-    //    is why passing info.Tc_K as the constructor's Tc below is right here.
-    //    On the mixture branch the base class calls set_Tred(Tr) while still
-    //    passing tau_i = Tc,i/T, which leaves an extra factor Tc,i/Tr in the
-    //    argument.  Task 9 must therefore make the T_red seen by these two
-    //    terms equal the COMPONENT's Tc (not the mixture Tr) -- e.g. by
-    //    overriding calc_alpha0_deriv_nocache / calc_all_alpha0_derivs_nocache
-    //    in GERGMixtureBackend -- and must verify it against
-    //    reference::mix_points_* h/s (or alphaig) at a composition where
-    //    Tr differs from every component Tc.  Only a mixture test can settle
-    //    it; no pure-fluid test in this task can.
+    //    The residual risk moved to the sinh/cosh terms, and it was a MIXTURE
+    //    risk only.  CoolProp's IdealHelmholtzGERG2004Sinh/Cosh compute
+    //    t = Tc_ctor/T_red internally and evaluate at t*tau_arg
+    //    (src/Helmholtz.cpp:1260-1341).  On the pure branch the base class
+    //    calls set_Tred(Tc) with the component's own Tc, so t == 1 and the
+    //    argument is theta*Tc/T -- correct.  On the MIXTURE branch it calls
+    //    set_Tred(Tr) with the mixture reducing temperature while still
+    //    passing tau_i = Tc,i/T, leaving a spurious extra factor Tc,i/Tr
+    //    inside every sinh/cosh.  No choice of Tc_ctor fixes that, because the
+    //    value it would need is Tr, which is composition-dependent and not
+    //    known at construction.
+    //
+    // 4. WHY THIS BACKEND DOES NOT USE GERG2004Sinh/GERG2004Cosh AT ALL.
+    //    Rather than route around the above with a virtual override of
+    //    calc_alpha0_deriv_nocache / calc_all_alpha0_derivs_nocache (neither
+    //    of which is virtual in this tree -- HelmholtzEOSMixtureBackend.h:641
+    //    and :644 -- and which in any case is behaviour, so it would not
+    //    survive the copy into a linked saturation state), the two terms are
+    //    re-expressed exactly, in a form that has no T_red dependence to get
+    //    wrong.  With x = theta*tau and tau the argument CoolProp actually
+    //    passes (Tc,i/T on BOTH branches, per point 3):
+    //
+    //      ln|sinh x| =  x + ln(1 - e^{-2x}) - ln 2
+    //      ln|cosh x| =  x + ln(1 + e^{-2x}) - ln 2      (x >= 0)
+    //
+    //    so  +n*ln|sinh(theta*tau)| becomes
+    //          a2 += n*theta ; a1 -= n*ln2 ; PlanckEinsteinGeneralized term
+    //          (n, theta_term = -2*theta, c = 1, d = -1)
+    //    and -n*ln|cosh(theta*tau)| becomes
+    //          a2 -= n*theta ; a1 += n*ln2 ; PlanckEinsteinGeneralized term
+    //          (-n, theta_term = -2*theta, c = 1, d = +1),
+    //    where IdealHelmholtzPlanckEinsteinGeneralized contributes
+    //    n*log(c + d*exp(theta_term*tau)) (Helmholtz.cpp:1152-1177).
+    //
+    //    None of IdealHelmholtzLead / LogTau / PlanckEinsteinGeneralized reads
+    //    _Tr, so set_Tred becomes irrelevant and the pure and mixture branches
+    //    agree by construction -- including in SatL/SatV, which carry data
+    //    rather than behaviour.  The identity is exact, so the 3070 pure-fluid
+    //    reference comparisons (which pass at 1e-12 on alphaig) are a direct
+    //    check on the rewrite; the mixture alphaig column is what checks that
+    //    the mixture branch now agrees too.  As a side benefit e^{-2x}
+    //    underflows to 0 for large x where sinh(x) would overflow.
+    //
+    //    cosh is EVEN and two published theta0 are negative (nitrogen's
+    //    theta0[5] = -5.3931, carbon dioxide's = -2.8444), so |theta| is used:
+    //    ln|cosh(theta*tau)| == ln|cosh(|theta|*tau)|.  Every theta0 on a SINH
+    //    index (4, 6) with a nonzero n0 is positive as published, so the same
+    //    absolute value is a no-op there; it is applied to both for symmetry.
     {
         const double RR = RSTAR_GERG / R_GERG;
+        const double LN2 = std::log(2.0);
 
-        EOS.alpha0.Lead = IdealHelmholtzLead(RR * ac.n0[1], RR * ac.n0[2]);
-        EOS.alpha0.LogTau = IdealHelmholtzLogTau(RR * ac.n0[3]);
+        double a1 = RR * ac.n0[1];
+        double a2 = RR * ac.n0[2];
+        std::vector<CoolPropDbl> pe_n, pe_theta, pe_c, pe_d;
 
         // AlphaigCoeffs vectors are length 8 and 1-based: n0[0] and
         // theta0[0..3] are padding.  Never iterate from 0.
-        std::vector<CoolPropDbl> n_sinh, th_sinh, n_cosh, th_cosh;
-        for (const std::size_t k : {static_cast<std::size_t>(4), static_cast<std::size_t>(6)}) {
-            // Guard on n0, exactly as teqp's recalc_integration_constants
-            // does: helium and argon have all four of n0[4..7] AND all four
-            // theta0 zero, and an unguarded n*log|sinh(0*tau)| would be
-            // 0*(-inf) == NaN rather than 0.
-            if (ac.n0[k] != 0.0) {
-                n_sinh.push_back(ac.n0[k] * RR);
-                th_sinh.push_back(ac.theta0[k]);
+        //
+        // Guard on n0, exactly as teqp's recalc_integration_constants does:
+        // helium and argon have all four of n0[4..7] AND all four theta0
+        // zero, and an unguarded n*log|sinh(0*tau)| would be 0*(-inf) == NaN
+        // rather than 0.  A nonzero n0 paired with a zero theta0 would be a
+        // genuine singularity in the published expression (ln|sinh 0|), not
+        // something the rewrite introduces; no shipped component has one, and
+        // the throw below is a drift guard for a future table edit.
+        auto emit = [&](std::size_t k, bool is_sinh) {
+            if (ac.n0[k] == 0.0) {
+                return;
             }
-        }
-        for (const std::size_t k : {static_cast<std::size_t>(5), static_cast<std::size_t>(7)}) {
-            if (ac.n0[k] != 0.0) {
-                n_cosh.push_back(ac.n0[k] * RR);
-                th_cosh.push_back(ac.theta0[k]);
+            const double th = std::abs(ac.theta0[k]);
+            if (th == 0.0) {
+                throw ValueError(format("GERG ideal-gas coefficients for [%s]: n0[%d] is nonzero but theta0[%d] is zero", gerg_name.c_str(),
+                                        static_cast<int>(k), static_cast<int>(k)));
             }
-        }
-        if (!n_sinh.empty()) {
-            EOS.alpha0.GERG2004Sinh = IdealHelmholtzGERG2004Sinh(n_sinh, th_sinh, info.Tc_K);
-        }
-        if (!n_cosh.empty()) {
-            EOS.alpha0.GERG2004Cosh = IdealHelmholtzGERG2004Cosh(n_cosh, th_cosh, info.Tc_K);
+            const double n = (is_sinh ? 1.0 : -1.0) * RR * ac.n0[k];
+            a2 += n * th;
+            a1 -= n * LN2;
+            pe_n.push_back(n);
+            pe_theta.push_back(-2.0 * th);
+            pe_c.push_back(1.0);
+            pe_d.push_back(is_sinh ? -1.0 : 1.0);
+        };
+        emit(4, true);
+        emit(6, true);
+        emit(5, false);
+        emit(7, false);
+
+        EOS.alpha0.Lead = IdealHelmholtzLead(a1, a2);
+        EOS.alpha0.LogTau = IdealHelmholtzLogTau(RR * ac.n0[3]);
+        if (!pe_n.empty()) {
+            EOS.alpha0.PlanckEinstein = IdealHelmholtzPlanckEinsteinGeneralized(pe_n, pe_theta, pe_c, pe_d);
         }
     }
 

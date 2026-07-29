@@ -268,6 +268,7 @@ def binary_pair_points(year, names):
     rows = []
     skipped = []
     nan_w = []
+    nan_alpha = []  # rows whose alphar or alphaig came back non-finite; see below
     for i in range(len(names)):
         for j in range(i + 1, len(names)):
             f1, f2 = names[i], names[j]
@@ -291,8 +292,18 @@ def binary_pair_points(year, names):
                 continue
             if not math.isfinite(w):
                 nan_w.append((f1, f2))
-            rows.append(([f1, f2], list(z), T, rho, p, cv, w))
-    return rows, skipped, nan_w
+            # alphar/alphaig are the two halves of the EOS in isolation, and
+            # alphaig is the ONLY column that can see an ideal-gas
+            # integration-constant or Tc-vs-T_red error (Task 8 measured this:
+            # a 1e-9 shift in n0[1] failed 624 alphaig assertions with alphar,
+            # p, cv and w all clean).  A row silently arriving here with a NaN
+            # in either column would be skipped per-field downstream and would
+            # remove that guard without failing anything, so it is counted and
+            # asserted on in main() rather than tolerated.
+            if not all_finite(Ar00, Aig00):
+                nan_alpha.append((f1, f2))
+            rows.append(([f1, f2], list(z), T, rho, Ar00, Aig00, p, cv, w))
+    return rows, skipped, nan_w, nan_alpha
 
 
 # ---------------------------------------------------------------------------
@@ -308,6 +319,7 @@ def aga8_points():
     rows = []
     skipped = []
     nan_w = []
+    nan_alpha = []  # same rationale as binary_pair_points'
     p_reldiffs = []  # (reldiff, gasno) for every emitted row -- used to report both
     # the worst-case and the median disagreement against validation_data.P_MPa.
     for gasno, T, D_molL, P_MPa, cv_ref, cp_ref, w_ref in VALIDATION_DATA:
@@ -330,11 +342,13 @@ def aga8_points():
             continue
         if not math.isfinite(w):
             nan_w.append(gasno)
+        if not all_finite(Ar00, Aig00):
+            nan_alpha.append(gasno)
         p_reldiffs.append((abs(p / 1e6 - P_MPa) / P_MPa, gasno))
         # Emit all 21 AGA8_NAMES/mole-fractions (not a trimmed nonzero subset) so
         # component order is unambiguous -- see the module docstring on AGA8_NAMES.
-        rows.append((list(AGA8_NAMES), list(z), T, rho, p, cv, w))
-    return rows, skipped, nan_w, p_reldiffs
+        rows.append((list(AGA8_NAMES), list(z), T, rho, Ar00, Aig00, p, cv, w))
+    return rows, skipped, nan_w, nan_alpha, p_reldiffs
 
 
 # ---------------------------------------------------------------------------
@@ -367,11 +381,12 @@ def emit_pure(rows, varname, out):
 
 def emit_mix(rows, varname, out):
     out.append(f"inline const std::vector<MixRefPoint> {varname} = {{")
-    for names, z, T, rho, p, cv, w in rows:
+    for names, z, T, rho, alphar, alphaig, p, cv, w in rows:
         names_str = ", ".join(f'"{n}"' for n in names)
         z_str = ", ".join(fnum(v) for v in z)
         out.append(
-            f"    {{{{{names_str}}}, {{{z_str}}}, {fnum(T)}, {fnum(rho)}, {fnum(p)}, {fnum(cv)}, {fnum(w)}}},"
+            f"    {{{{{names_str}}}, {{{z_str}}}, {fnum(T)}, {fnum(rho)}, "
+            f"{fnum(alphar)}, {fnum(alphaig)}, {fnum(p)}, {fnum(cv)}, {fnum(w)}}},"
         )
     out.append("};")
     out.append("")
@@ -380,9 +395,9 @@ def emit_mix(rows, varname, out):
 def main():
     pure_2004, nulls_2004 = pure_points(2004, GERG2004_NAMES)
     pure_2008, nulls_2008 = pure_points(2008, GERG2008_NAMES)
-    bin_2004, binskip_2004, nanw_2004 = binary_pair_points(2004, GERG2004_NAMES)
-    bin_2008, binskip_2008, nanw_2008 = binary_pair_points(2008, GERG2008_NAMES)
-    aga8_rows, aga8_skip, aga8_nanw, p_reldiffs = aga8_points()
+    bin_2004, binskip_2004, nanw_2004, nanalpha_2004 = binary_pair_points(2004, GERG2004_NAMES)
+    bin_2008, binskip_2008, nanw_2008, nanalpha_2008 = binary_pair_points(2008, GERG2008_NAMES)
+    aga8_rows, aga8_skip, aga8_nanw, aga8_nanalpha, p_reldiffs = aga8_points()
 
     mix_2008 = bin_2008 + aga8_rows
 
@@ -412,6 +427,15 @@ def main():
         f"AGA8 rows: {len(aga8_rows)} emitted from {len(VALIDATION_DATA)} validation_data entries, "
         f"expected 187 of both -- {len(aga8_skip)} gas(es) dropped: {aga8_skip}"
     )
+    # Every emitted mixture row must carry a finite alphar AND a finite alphaig.
+    # Task 9's gate skips a NaN reference field rather than failing on it (a
+    # NaN w is legitimate on the spinodal branch), so a NaN that crept into the
+    # alpha columns would quietly delete the only instrument that can see an
+    # ideal-gas error -- exactly the failure mode these columns were added for.
+    # Assert here, at generation time, instead of shipping it.
+    assert not nanalpha_2004, f"mix_points_2004: non-finite alphar/alphaig on {len(nanalpha_2004)} pair(s): {nanalpha_2004}"
+    assert not nanalpha_2008, f"mix_points_2008 binary pairs: non-finite alphar/alphaig on {len(nanalpha_2008)} pair(s): {nanalpha_2008}"
+    assert not aga8_nanalpha, f"mix_points_2008 AGA8: non-finite alphar/alphaig on {len(aga8_nanalpha)} gas(es): {aga8_nanalpha}"
 
     reldiffs_sorted = sorted(p_reldiffs)
     worst_reldiff, worst_gasno = reldiffs_sorted[-1]
@@ -440,6 +464,8 @@ def main():
         f"# mix_points_2008 (binary pairs + AGA8): {len(mix_2008)} emitted "
         f"({len(bin_2008)} of {n_pairs_2008} expected pairs + {len(aga8_rows)} of 187 expected AGA8 gases, "
         f"both counts assert-enforced), {len(nanw_2008)} pairs with w = NaN, {len(aga8_nanw)} AGA8 with w = NaN",
+        "# Mixture alphar/alphaig: 0 NaN on every emitted row of both vectors (assert-enforced). w is the "
+        "ONLY mixture column that is ever NaN, so Task 9's per-field skip may fire on w and on nothing else.",
         f"# AGA8 p_teqp vs validation_data.P_MPa: worst {worst_reldiff:.3e} (gas {worst_gasno}), "
         f"median {median_reldiff:.3e} across {len(p_reldiffs)} rows, {n_over_1e6} rows > 1e-6 -- see",
         "# dev/gerg/README.md for why this is a table-vs-reference-code provenance issue (confirmed against",
@@ -507,6 +533,17 @@ def main():
     out.append("/// of `names` and `z` independently in Task 9 must not be possible to do")
     out.append("/// silently the way a bare std::vector<double> composition would allow.")
     out.append("///")
+    out.append("/// `alphar`/`alphaig` are the dimensionless residual/ideal-gas Helmholtz")
+    out.append("/// energies of the MIXTURE (teqp's get_Ar00 on the GERG200Xresid and")
+    out.append("/// GERG200Xidealgas models respectively), so `alphaig` includes teqp's own")
+    out.append("/// sum_i x_i*(alpha0_i + ln x_i) mixing term.  `alphaig` is the only column")
+    out.append("/// in this struct that can detect an ideal-gas error: the mixture branch of")
+    out.append("/// CoolProp's calc_alpha0_deriv_nocache evaluates each component's alpha0 at")
+    out.append("/// the component's own Tc_i/T, and getting the Tc-vs-T_red convention wrong")
+    out.append("/// there perturbs alphaig long before it is visible in p (which is blind to")
+    out.append("/// the ideal-gas part entirely).  Both are ALWAYS finite -- the generator")
+    out.append("/// asserts it -- unlike `w` below.")
+    out.append("///")
     out.append("/// `w` is NaN (std::isnan(w) true) for a small number of rows in")
     out.append("/// mix_points_2004/mix_points_2008: this fixed (T=250K, rho=5000 mol/m^3)")
     out.append("/// state falls on the mechanically-unstable (spinodal, d p/d rho|T < 0)")
@@ -520,7 +557,7 @@ def main():
     out.append("{")
     out.append("    std::vector<const char*> names;")
     out.append("    std::vector<double> z;")
-    out.append("    double T_K, rhomolar, p_Pa, cvmolar, w;")
+    out.append("    double T_K, rhomolar, alphar, alphaig, p_Pa, cvmolar, w;")
     out.append("};")
     out.append("")
     out.append("/// Pure fluids: each of the 18 GERG-2004 / 21 GERG-2008 component EOS at")

@@ -85,16 +85,20 @@ constexpr double RSTAR_GERG = 8.314510;  ///< J/mol/K
 /// stored coefficients, so Task 8 must apply it itself (CoolProp's
 /// GERG2004Cosh/GERG2004Sinh terms do not know about it).
 ///
-/// MIXTURES (load-bearing for Task 8): Tc here is the COMPONENT's own
-/// PureInfo::Tc_K, not the mixture reducing temperature T_red.  CoolProp's
-/// ideal-gas terms work in tau = T_red/T, so for a mixture the first three
-/// terms have to be re-expressed:
-///   n0[2]*Tc/T     = (n0[2]*Tc/T_red) * tau
-///   n0[3]*ln(Tc/T) = n0[3]*ln(tau) + n0[3]*ln(Tc/T_red)
-/// i.e. Tc/T_red must be folded into the n0[2] coefficient and the constant
-/// n0[3]*ln(Tc/T_red) added.  For a pure fluid T_red == Tc and both corrections
-/// vanish, so getting this wrong is invisible to pure-fluid tests and corrupts
-/// only mixtures.
+/// MIXTURES: Tc here is the COMPONENT's own PureInfo::Tc_K, not the mixture
+/// reducing temperature T_red -- and NO Tc/T_red folding is needed or wanted.
+/// An earlier draft of this comment claimed the opposite; it was wrong, and
+/// folding would double-apply a rescale CoolProp already performs.  BOTH
+/// branches of HelmholtzEOSMixtureBackend::calc_alpha0_deriv_nocache hand a
+/// component's alpha0 container that component's own Tc,i/T: the pure branch
+/// evaluates at taustar = Tc/Tr*tau, the mixture branch at
+/// tau_i = T_ci*tau/Tr, and both equal Tc,i/T.  So the coefficients go in
+/// exactly as tabulated.  See the long comment on make_gerg_fluid in
+/// GERGBackend.cpp, which also explains why the sinh/cosh terms are
+/// re-expressed as Lead + PlanckEinsteinGeneralized instead of being handed to
+/// IdealHelmholtzGERG2004Sinh/Cosh (those DO consult T_red, and the mixture
+/// branch sets it to Tr, which would leave a spurious factor Tc,i/Tr inside
+/// every sinh and cosh -- invisible for a pure fluid, where Tr == Tc).
 struct AlphaigCoeffs
 {
     std::vector<double> n0, theta0;

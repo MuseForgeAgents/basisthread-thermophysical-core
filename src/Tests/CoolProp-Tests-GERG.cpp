@@ -23,6 +23,7 @@ TEST_CASE("GERG backend families are registered", "[GERG]") {
     CHECK(f1 == GERG2008_BACKEND_FAMILY);
 }
 
+#    include "../Backends/GERG/GERGBackend.h"
 #    include "../Backends/GERG/GERGData.h"
 #    include "../Backends/GERG/GERGReferenceValues.h"
 
@@ -511,6 +512,70 @@ void compare_pure_points(const std::string& backend, const std::vector<CoolProp:
     }
 }
 
+void compare_mix_points(const std::string& backend, const std::vector<CoolProp::GERG::reference::MixRefPoint>& points, RefTally& tally,
+                        std::size_t& rows_trimmed) {
+    std::size_t row = 0;
+    for (const auto& pt : points) {
+        // Not decoration: names and z are parallel vectors, and a row whose
+        // composition had been truncated would otherwise be handed to
+        // set_mole_fractions and throw somewhere far from here.
+        REQUIRE(pt.names.size() == pt.z.size());
+
+        // Drop components with a mole fraction of EXACTLY zero, preserving the
+        // order of the ones that remain.
+        //
+        // This is not a convenience: CoolProp's GERG2008ReducingFunction
+        // computes f_Y_ij = x_i x_j (x_i + x_j) / (beta^2 x_i + x_j)
+        // (ReducingFunctions.cpp:565-568), which is 0/0 = NaN whenever BOTH
+        // mole fractions are zero -- and the AGA8 rows carry all 21 component
+        // names with many exact zeros.  The whole reducing state then goes
+        // NaN.  Removing a zero-fraction component is exactly equivalent
+        // analytically (its x_i^2 Y_c,i term, its x_i x_j cross terms, its
+        // x_i alpha^r_i and its x_i (alpha^0_i + ln x_i) are all identically
+        // zero), and it preserves the AGA8 column order, so it cannot
+        // reintroduce the AGA8-vs-component_names ordering bug the generator
+        // warns about -- unlike re-deriving the order from a name list.
+        // The count of trimmed rows is returned and pinned by the caller so
+        // this cannot silently start applying to rows it should not.
+        std::vector<std::string> names;
+        std::vector<CoolPropDbl> z;
+        for (std::size_t k = 0; k < pt.names.size(); ++k) {
+            if (pt.z[k] != 0.0) {
+                names.emplace_back(pt.names[k]);
+                z.push_back(static_cast<CoolPropDbl>(pt.z[k]));
+            }
+        }
+        REQUIRE(names.size() >= 2);
+        if (names.size() != pt.names.size()) {
+            ++rows_trimmed;
+        }
+
+        std::shared_ptr<CoolProp::AbstractState> AS(CoolProp::AbstractState::factory(backend, names));
+        AS->set_mole_fractions(z);
+        // Same rationale as the pure grid: the fixed (250 K, 5000 mol/m^3)
+        // binary-pair state is inside the two-phase dome for many pairs, and
+        // the GERG backend has no ancillary equations to run a saturation
+        // solver with.  teqp evaluates the single-phase EOS analytically.
+        AS->specify_phase(CoolProp::iphase_gas);
+        CAPTURE(backend, row, names.size(), names.front(), names.back(), pt.T_K, pt.rhomolar);
+        ++row;
+        AS->update(CoolProp::DmolarT_INPUTS, pt.rhomolar, pt.T_K);
+        ++tally.rows;
+
+        // alphaig is the sharpest instrument here and the reason the column
+        // was added to MixRefPoint: the mixture branch of
+        // calc_alpha0_deriv_nocache is a completely different code path from
+        // the pure branch, and an error in it (e.g. the spurious Tc,i/Tr
+        // factor the GERG2004Sinh/Cosh terms would introduce) moves alphaig
+        // while leaving alphar and p exactly right.
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
+    }
+}
+
 }  // namespace
 
 TEST_CASE("GERG pure fluids reproduce teqp", "[GERG]") {
@@ -664,6 +729,253 @@ TEST_CASE("GERG canonical-name fast path does not weaken model strictness", "[GE
 
 TEST_CASE("GERG backend rejects an empty component list", "[GERG]") {
     CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{}), CoolProp::ValueError);
+}
+
+// ###########################################################################
+// Mixtures (Task 9).  Two independent things are being pinned here: that the
+// reducing function and the excess/departure term reproduce teqp, and that
+// they were built from the GERG tables rather than from CoolProp's global
+// binary-interaction-parameter library.  The second is not implied by the
+// first only because the first is so broad -- it is stated separately below
+// so that a future refactor deleting the override fails with a message that
+// says what happened.
+// ###########################################################################
+
+TEST_CASE("GERG mixtures reproduce teqp", "[GERG]") {
+    using namespace CoolProp::GERG::reference;
+
+    std::size_t trimmed_2004 = 0, trimmed_2008 = 0;
+
+    RefTally t2004;
+    compare_mix_points("GERG2004", mix_points_2004, t2004, trimmed_2004);
+    // All C(18,2) = 153 GERG-2004 binary pairs at (250 K, 5000 mol/m^3,
+    // z = [0.4, 0.6]) -- one numeric point per reducing-parameter row.  19 of
+    // the 153 w values are NaN (spinodal branch); alphar/alphaig/p/cv never
+    // are, which the generator asserts at generation time.
+    CHECK(t2004.rows == 153);
+    CHECK(t2004.nan_skipped == 19);
+    CHECK(t2004.compared == 153 * 5 - 19);
+    // Every binary-pair row is a genuine two-component mixture with both mole
+    // fractions nonzero, so none of them may be trimmed.
+    CHECK(trimmed_2004 == 0);
+
+    RefTally t2008;
+    compare_mix_points("GERG2008", mix_points_2008, t2008, trimmed_2008);
+    // C(21,2) = 210 binary pairs + 187 AGA8 natural-gas compositions; 40 NaN w.
+    CHECK(t2008.rows == 210 + 187);
+    CHECK(t2008.nan_skipped == 40);
+    CHECK(t2008.compared == (210 + 187) * 5 - 40);
+    // All 187 AGA8 rows carry all 21 component names, most of them with a zero
+    // mole fraction, and are trimmed; none of the 210 binary-pair rows is.
+    CHECK(trimmed_2008 == 187);
+}
+
+TEST_CASE("GERG mixture parameters come from the GERG tables, not CoolProp's BIP library", "[GERG]") {
+    // GERGMixtureBackend::set_mixture_parameters exists to keep
+    // HelmholtzEOSMixtureBackend::set_mixture_parameters -- which resolves
+    // every binary pair through CoolProp's GLOBAL binary-pair library by CAS
+    // number -- from ever answering for a backend named GERG2004/GERG2008.
+    // That library carries Bell-JCED-2016 refits that override the
+    // Kunz-JCED-2012 (GERG) rows for pairs GERG also defines, so reaching it
+    // would return plausible, non-GERG numbers with no error anywhere.
+    //
+    // This test does NOT rely on the interim "it throws because CoolPropFluid
+    // ::CAS is empty" accident.  It recomputes the mixture reducing state from
+    // the GERG monograph's own beta/gamma (via GERGData.h) and pins it, so
+    // substituting ANY other parameter source -- throwing or not -- fails.
+    struct Case
+    {
+        const char* backend;
+        GERGModel model;
+        const char* f1;
+        const char* f2;
+    };
+    // methane/ethane and methane/n-butane are GERG pairs that CoolProp's own
+    // library also defines (so the inherited path would silently succeed);
+    // methane/propane exercises a pair with a fluid-specific departure
+    // function; nitrogen/hydrogen has betaT != 1 in BOTH directions, which is
+    // where a dropped reciprocal shows up.
+    const std::vector<Case> cases = {
+      {"GERG2008", GERGModel::GERG_2008, "methane", "ethane"},      {"GERG2008", GERGModel::GERG_2008, "methane", "n-butane"},
+      {"GERG2008", GERGModel::GERG_2008, "methane", "propane"},     {"GERG2004", GERGModel::GERG_2004, "nitrogen", "hydrogen"},
+      {"GERG2004", GERGModel::GERG_2004, "carbondioxide", "water"},
+    };
+    const double x1 = 0.35, x2 = 0.65;  // deliberately not 0.5/0.5: at equimolar the
+                                        // beta-weighted term is symmetric in beta and
+                                        // a swapped reciprocal is much harder to see.
+    for (const auto& c : cases) {
+        CAPTURE(c.backend, c.f1, c.f2);
+        std::shared_ptr<AbstractState> AS(AbstractState::factory(c.backend, std::vector<std::string>{c.f1, c.f2}));
+        AS->set_mole_fractions(std::vector<CoolPropDbl>{x1, x2});
+
+        const BetasGammas bg = get_betasgammas(c.model, c.f1, c.f2);
+        const PureInfo i1 = get_pure_info(c.model, c.f1);
+        const PureInfo i2 = get_pure_info(c.model, c.f2);
+
+        // GERG-2008 Eqs. 7.9/7.10 (Kunz & Wagner 2012), which is exactly what
+        // GERG2008ReducingFunction implements.
+        const double Tr = x1 * x1 * i1.Tc_K + x2 * x2 * i2.Tc_K
+                          + 2 * x1 * x2 * bg.betaT * bg.gammaT * (x1 + x2) / (bg.betaT * bg.betaT * x1 + x2) * std::sqrt(i1.Tc_K * i2.Tc_K);
+        const double vc12 = 1.0 / 8.0 * std::pow(std::pow(i1.rhoc_molm3, -1.0 / 3.0) + std::pow(i2.rhoc_molm3, -1.0 / 3.0), 3);
+        const double vr =
+          x1 * x1 / i1.rhoc_molm3 + x2 * x2 / i2.rhoc_molm3 + 2 * x1 * x2 * bg.betaV * bg.gammaV * (x1 + x2) / (bg.betaV * bg.betaV * x1 + x2) * vc12;
+
+        CHECK_THAT(AS->T_reducing(), Catch::Matchers::WithinRel(Tr, 1e-14));
+        CHECK_THAT(AS->rhomolar_reducing(), Catch::Matchers::WithinRel(1.0 / vr, 1e-14));
+
+        // Both triangles of the beta/gamma matrices, read straight back out of
+        // the reducing function.  These four-per-parameter assertions are NOT
+        // redundant with the reducing-state pins above: every call site in
+        // GERG2008ReducingFunction passes its index pair in ascending order
+        // (f_Y_ij/dfYkidxi/dfYikdxi, ReducingFunctions.cpp:257, 306-322,
+        // 550-563), so the LOWER triangle is currently read by nothing at all.
+        // Mutation-verified: writing beta_T[j][i] = bg.betaT instead of
+        // 1/bg.betaT leaves every other assertion in this file green.  A
+        // future CoolProp change that starts reading beta[j][i] -- a
+        // composition-derivative or fugacity path is the obvious candidate --
+        // would silently inherit a wrong value without these.
+        CHECK_THAT(AS->get_binary_interaction_double(0, 1, "betaT"), Catch::Matchers::WithinRel(bg.betaT, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(1, 0, "betaT"), Catch::Matchers::WithinRel(1.0 / bg.betaT, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(0, 1, "betaV"), Catch::Matchers::WithinRel(bg.betaV, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(1, 0, "betaV"), Catch::Matchers::WithinRel(1.0 / bg.betaV, 1e-15));
+        // gammas are symmetric under exchange -- NOT reciprocated.
+        CHECK_THAT(AS->get_binary_interaction_double(0, 1, "gammaT"), Catch::Matchers::WithinRel(bg.gammaT, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(1, 0, "gammaT"), Catch::Matchers::WithinRel(bg.gammaT, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(0, 1, "gammaV"), Catch::Matchers::WithinRel(bg.gammaV, 1e-15));
+        CHECK_THAT(AS->get_binary_interaction_double(1, 0, "gammaV"), Catch::Matchers::WithinRel(bg.gammaV, 1e-15));
+    }
+
+    // ... and the pins above are discriminating, not tautological.  All 210
+    // GERG-2008 binary pairs are present in CoolProp's global library, 194 of
+    // them with the very same Kunz-JCED-2012 row GERG publishes -- but 16 with
+    // a later refit (15 Gernert-Thesis-2013, 1 Tkaczuk-JPCRD-2020).  Twelve of
+    // those 16 move the mixture reducing temperature by more than 0.03 K at
+    // this composition; the four below move it by 1.5 K to 42 K, so the
+    // inherited path could not possibly pass the pins above for them.  If any
+    // of these ever stops differing, this test has to be re-pointed at a pair
+    // that still does.
+    //
+    // The remaining four non-Kunz pairs (nitrogen/carbondioxide,
+    // nitrogen/oxygen, oxygen/carbonmonoxide, carbonmonoxide/argon) carry
+    // beta/gamma numerically equal to GERG's but a DIFFERENT departure
+    // function, which the reducing state cannot see.  Those are caught instead
+    // by the alphar column of "GERG mixtures reproduce teqp", which compares
+    // every one of the 210 pairs at 1e-12.
+    for (const auto& pair :
+         std::vector<std::vector<std::string>>{{"water", "argon"}, {"water", "nitrogen"}, {"carbondioxide", "water"}, {"helium", "argon"}}) {
+        CAPTURE(pair[0], pair[1]);
+        std::shared_ptr<AbstractState> G(AbstractState::factory("GERG2008", pair));
+        std::shared_ptr<AbstractState> H(AbstractState::factory("HEOS", pair));
+        G->set_mole_fractions(std::vector<CoolPropDbl>{x1, x2});
+        H->set_mole_fractions(std::vector<CoolPropDbl>{x1, x2});
+        CHECK(std::abs(H->T_reducing() - G->T_reducing()) > 1.0);
+    }
+}
+
+TEST_CASE("GERG mixture linked saturation states are GERG-typed", "[GERG]") {
+    // HelmholtzEOSMixtureBackend::set_components builds SatL/SatV with an
+    // EXPLICITLY qualified HelmholtzEOSMixtureBackend::get_copy(false)
+    // (HelmholtzEOSMixtureBackend.cpp:142, :146), so a get_copy override alone
+    // cannot change their type -- GERGMixtureBackend overrides set_components
+    // instead.  Were that override removed, the base-class SatL would run the
+    // INHERITED set_mixture_parameters during its own construction, i.e. the
+    // fail-open this backend exists to prevent (or, with CAS still empty, a
+    // throw out of the factory).  Either way this test fails.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"methane", "ethane"}));
+    auto* gerg = dynamic_cast<GERGMixtureBackend*>(AS.get());
+    REQUIRE(gerg != nullptr);
+    CHECK(gerg->backend_name() == "GERG2008Backend");
+    CHECK(gerg->get_SatL().backend_name() == "GERG2008Backend");
+    CHECK(gerg->get_SatV().backend_name() == "GERG2008Backend");
+
+    // And they evaluate identically to the parent, ideal-gas part included --
+    // the linked states carry the reducing/excess objects as DATA (via
+    // sync_linked_states) but the ideal-gas path is re-derived from their own
+    // components, so this is the assertion that would catch a divergence
+    // between parent and linked state.
+    const std::vector<CoolPropDbl> z{0.35, 0.65};
+    AS->set_mole_fractions(z);
+    AS->specify_phase(iphase_gas);
+    AS->update(DmolarT_INPUTS, 4000.0, 260.0);
+    for (auto* sat : {&gerg->get_SatL(), &gerg->get_SatV()}) {
+        sat->set_mole_fractions(z);
+        sat->specify_phase(iphase_gas);
+        sat->update(DmolarT_INPUTS, 4000.0, 260.0);
+        CHECK_THAT(sat->alphar(), Catch::Matchers::WithinRel(AS->alphar(), 1e-15));
+        CHECK_THAT(sat->alpha0(), Catch::Matchers::WithinRel(AS->alpha0(), 1e-15));
+        CHECK_THAT(sat->p(), Catch::Matchers::WithinRel(AS->p(), 1e-15));
+    }
+}
+
+TEST_CASE("GERG mixture state can be copied", "[GERG]") {
+    // ExcessTerm::copy() dereferences EVERY off-diagonal departure-function
+    // pointer (ExcessHEFunction.h:215-227), including for the majority of
+    // pairs that carry no departure function at all -- methane/water is one,
+    // F_ij is not even in the table -- so a null there is a segfault on copy,
+    // not a zero.  set_mixture_parameters installs a zero-valued
+    // ExponentialDepartureFunction placeholder for exactly this reason.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"methane", "water"}));
+    AS->set_mole_fractions(std::vector<CoolPropDbl>{0.9, 0.1});
+    AS->specify_phase(iphase_gas);
+    CHECK_NOTHROW(AS->update(DmolarT_INPUTS, 5000.0, 400.0));
+
+    auto* gerg = dynamic_cast<GERGMixtureBackend*>(AS.get());
+    REQUIRE(gerg != nullptr);
+    std::shared_ptr<HelmholtzEOSMixtureBackend> copy;
+    REQUIRE_NOTHROW(copy.reset(gerg->get_copy(true)));
+    // get_copy is overridden too, so TPD_state / critical_state /
+    // transient_pure_state (which call it unqualified) stay GERG-typed.
+    CHECK(copy->backend_name() == "GERG2008Backend");
+    copy->set_mole_fractions(std::vector<CoolPropDbl>{0.9, 0.1});
+    copy->specify_phase(iphase_gas);
+    copy->update(DmolarT_INPUTS, 5000.0, 400.0);
+    CHECK_THAT(copy->p(), Catch::Matchers::WithinRel(AS->p(), 1e-15));
+    CHECK_THAT(copy->alphar(), Catch::Matchers::WithinRel(AS->alphar(), 1e-15));
+    CHECK_THAT(copy->alpha0(), Catch::Matchers::WithinRel(AS->alpha0(), 1e-15));
+}
+
+TEST_CASE("GERG-2004 and GERG-2008 disagree where the models disagree", "[GERG]") {
+    // Carbon monoxide's pure EOS and reducing state both changed between the
+    // two models, so the two backends must not be silently aliased.
+    std::shared_ptr<AbstractState> a(AbstractState::factory("GERG2004", std::vector<std::string>{"CarbonMonoxide"}));
+    std::shared_ptr<AbstractState> b(AbstractState::factory("GERG2008", std::vector<std::string>{"CarbonMonoxide"}));
+    a->specify_phase(iphase_gas);
+    b->specify_phase(iphase_gas);
+    a->update(DmolarT_INPUTS, 5000.0, 200.0);
+    b->update(DmolarT_INPUTS, 5000.0, 200.0);
+    CHECK(a->p() != b->p());
+
+    // Methane is unchanged between the two models.
+    std::shared_ptr<AbstractState> c(AbstractState::factory("GERG2004", std::vector<std::string>{"Methane"}));
+    std::shared_ptr<AbstractState> d(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    c->specify_phase(iphase_gas);
+    d->specify_phase(iphase_gas);
+    c->update(DmolarT_INPUTS, 5000.0, 200.0);
+    d->update(DmolarT_INPUTS, 5000.0, 200.0);
+    CHECK_THAT(c->p(), Catch::Matchers::WithinRel(d->p(), 1e-15));
+
+    // The same for a MIXTURE: GERG-2008 revises the isopentane/carbonmonoxide
+    // reducing parameters (gammaV 1.116693501 -> 1.116694577, gammaT
+    // 1.199475627 -> 1.199326059) as well as both pure EOS, so the two
+    // backends must differ on this pair too -- and must NOT differ on a pair
+    // GERG-2008 leaves alone.
+    for (const auto& pair : std::vector<std::vector<std::string>>{{"isopentane", "carbonmonoxide"}, {"methane", "nitrogen"}}) {
+        CAPTURE(pair[0], pair[1]);
+        std::shared_ptr<AbstractState> m4(AbstractState::factory("GERG2004", pair));
+        std::shared_ptr<AbstractState> m8(AbstractState::factory("GERG2008", pair));
+        for (auto* s : {m4.get(), m8.get()}) {
+            s->set_mole_fractions(std::vector<CoolPropDbl>{0.4, 0.6});
+            s->specify_phase(iphase_gas);
+            s->update(DmolarT_INPUTS, 3000.0, 300.0);
+        }
+        if (pair[0] == "methane") {
+            CHECK_THAT(m4->p(), Catch::Matchers::WithinRel(m8->p(), 1e-15));
+            CHECK_THAT(m4->T_reducing(), Catch::Matchers::WithinRel(m8->T_reducing(), 1e-15));
+        } else {
+            CHECK(m4->p() != m8->p());
+            CHECK(m4->T_reducing() != m8->T_reducing());
+        }
+    }
 }
 
 #endif /* ENABLE_CATCH */
