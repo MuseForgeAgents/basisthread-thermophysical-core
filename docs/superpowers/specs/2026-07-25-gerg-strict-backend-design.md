@@ -23,17 +23,32 @@ teqp's test values are the acceptance criterion.
 
 Two independent reasons, either sufficient on its own.
 
-**Binary interaction parameters.**  Of the 888 pairs in
-`dev/mixtures/mixture_binary_pairs.json`, only 194 carry `Kunz-JCED-2012`
-(GERG-2008) provenance.  582 are `Bell-JCED-2016` refits that *override* the
-GERG reducing parameters for pairs GERG also defines.  Loading the default
-library would silently produce non-GERG results for the majority of pairs.
+**Binary interaction parameters.**  *(Corrected 2026-07-29 — the original
+version of this paragraph was wrong; see below.)*  All 210 GERG-2008 binary
+pairs are present in `dev/mixtures/mixture_binary_pairs.json`.  Of those, 194
+carry `Kunz-JCED-2012` provenance and are the GERG values themselves; 15 are
+`Gernert-Thesis-2013` refits and 1 is `Tkaczuk-JPCRD-2020`.  So 16 of 210
+pairs would silently differ from GERG if the default library were used.
+
+The original text claimed 582 `Bell-JCED-2016` refits override GERG pairs.
+That was a misreading: 582 is the Bell-2016 count across the *whole* 888-pair
+library, and **none** of those rows is a GERG pair — they cover refrigerants
+and other non-GERG systems.  The binary-pair argument for a separate backend
+is therefore much weaker than first stated: it is 16 pairs, not 582.
 
 **Pure-fluid equations of state.**  CoolProp ships the reference EOS for each
 fluid (Setzmann-Wagner for methane, Span-Wagner for CO2, and so on).  GERG uses
 its own shortened technical form — 12 to 24 polynomial and exponential terms
 with a shared exponent set for most fluids.  These are different equations
-producing different numbers.
+producing different numbers.  This is the load-bearing argument and it is
+unaffected by the binary-pair correction above.
+
+**The gas constant.**  *(Added 2026-07-29, discovered during implementation.)*
+GERG specifies `R = 8.314472 J/mol/K`.  CoolProp's `calc_gas_constant` returns
+the CODATA value for any mixture under the default `NORMALIZE_GAS_CONSTANTS`
+configuration, which rescales `p`, `alpha^ig`, `c_v` and `w` by about 1.1e-6
+while leaving `alpha^r` exact.  A backend that did not override this would be
+wrong at the sixth significant figure in a way no structural test would catch.
 
 The backend therefore carries a self-contained parameter set: pure EOS, ideal-gas
 coefficients, reducing parameters, departure functions, and ancillaries.
