@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "CoolProp/CoolProp.h"
+#include "CoolProp/Configuration.h"
 #include "CoolProp/Exceptions.h"
 #include "GERGData.h"
 #include "Backends/Helmholtz/ExcessHEFunction.h"
@@ -54,13 +55,24 @@ void GERGMixtureBackend::set_components(const std::vector<CoolPropFluid>& comps,
     // with GERG-typed states.  Constructing them with
     // generate_SatL_and_SatV = false is what stops the recursion.
     //
-    // linked_states is cleared first: the base block appends unconditionally,
-    // so calling set_components twice on one object would otherwise leave the
+    // The PREVIOUS SatL/SatV (if any -- set_components is only called from
+    // constructors today, so on a freshly-constructed object there is
+    // nothing to remove) are erased from linked_states before being replaced,
+    // so calling set_components twice on one object does not leave the
     // superseded SatL/SatV in linked_states, where sync_linked_states would
-    // keep writing to them forever.  SatL/SatV are the only linked states that
-    // exist at this point (TPD_state/critical_state/transient_pure_state are
-    // created lazily, long after construction).
-    linked_states.clear();
+    // keep writing to them forever.  This erases ONLY the two SatL/SatV
+    // entries -- by pointer identity, not by clearing the whole vector -- so
+    // TPD_state/critical_state/transient_pure_state (HelmholtzEOSMixtureBackend.h:85,93,101)
+    // are left untouched if they happen to already be linked.  An earlier
+    // version called linked_states.clear() unconditionally: harmless today
+    // because those three are only ever created lazily, long after
+    // construction, but a future caller of set_components on a live object
+    // would silently strand them (non-null members, never reachable through
+    // linked_states again) -- trading one latent hazard for another instead
+    // of fixing it. (task-10 review, carried forward from task-9.)
+    linked_states.erase(std::remove_if(linked_states.begin(), linked_states.end(),
+                                       [this](const shared_ptr<HelmholtzEOSMixtureBackend>& s) { return s == SatL || s == SatV; }),
+                        linked_states.end());
 
     SatL.reset(new GERGMixtureBackend(m_model, comps, false));
     SatL->specify_phase(iphase_liquid);
@@ -71,6 +83,35 @@ void GERGMixtureBackend::set_components(const std::vector<CoolPropFluid>& comps,
     SatV->specify_phase(iphase_gas);
     SatV->clear();
     linked_states.push_back(SatV);
+}
+
+void GERGMixtureBackend::update(CoolProp::input_pairs input_pair, double value1, double value2) {
+    HelmholtzEOSMixtureBackend::update(input_pair, value1, value2);
+    check_gerg_range_of_validity();
+}
+
+void GERGMixtureBackend::check_gerg_range_of_validity() {
+    // T only, deliberately NOT p: EOS.limits.pmax (70 MPa, make_gerg_fluid)
+    // is the mixture MODEL's published operating envelope, but "GERG pure
+    // fluids/mixtures reproduce teqp" (this file) legitimately evaluates
+    // fixed (T, rho) reference points whose pressure is far outside it --
+    // including deep into the two-phase dome, where teqp's single-phase EOS
+    // (and this backend, matching it) is expected to return a large or
+    // negative p.  A pmax check here does not distinguish "unphysical
+    // operating point" from "single-phase EOS evaluated where a real fluid
+    // would be two-phase", and adding one made exactly those reference tests
+    // fail with p up to 3.1e10 Pa at a perfectly ordinary (250 K, 5000
+    // mol/m^3) grid point.  Matches every other property-limit guard in
+    // HelmholtzEOSMixtureBackend.cpp (melting-line, Tmax_sat, ...): a caller
+    // who has explicitly opted out gets no check, rather than this backend
+    // enforcing a range CoolProp's own configuration says to ignore.
+    if (CoolProp::get_config_bool(DONT_CHECK_PROPERTY_LIMITS)) {
+        return;
+    }
+    const double Tlo = Tmin(), Thi = Tmax();
+    if (_T < Tlo || _T > Thi) {
+        throw CoolProp::OutOfRangeError(format("Temperature [%g K] is outside the GERG range of validity [%g, %g] K", _T, Tlo, Thi));
+    }
 }
 
 CoolPropDbl GERGMixtureBackend::calc_gas_constant() {

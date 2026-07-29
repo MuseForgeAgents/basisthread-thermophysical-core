@@ -8,6 +8,7 @@
 #    include <string>
 
 #    include "CoolProp/AbstractState.h"
+#    include "CoolProp/Configuration.h"
 #    include "CoolProp/DataStructures.h"
 #    include "CoolProp/Exceptions.h"
 
@@ -446,17 +447,55 @@ TEST_CASE("GERG departure_Npower does not throw when every term is polynomial", 
 
 namespace {
 
+/// The reference grids below intentionally sweep a wider (T, rho) range than
+/// GERGMixtureBackend::check_gerg_range_of_validity (task 10) enforces on
+/// ordinary use: they include per-COMPONENT points above the model's 700 K
+/// MIXTURE Tmax (propane at 739.65 K is one), and states deep in the
+/// two-phase dome where the single-phase EOS legitimately returns a negative
+/// or huge p. These are checks of the raw assembled EOS against teqp's
+/// numbers, not claims that every grid point is a physically attainable GERG
+/// state, so the sweep needs the same escape hatch CoolProp already uses
+/// elsewhere for exactly this tension (Ancillaries.cpp, TabularBackends.cpp):
+/// DONT_CHECK_PROPERTY_LIMITS.
+class PropertyLimitsSuspender
+{
+   public:
+    PropertyLimitsSuspender() : was_set(CoolProp::get_config_bool(DONT_CHECK_PROPERTY_LIMITS)) {
+        CoolProp::set_config_bool(DONT_CHECK_PROPERTY_LIMITS, true);
+    }
+    ~PropertyLimitsSuspender() {
+        CoolProp::set_config_bool(DONT_CHECK_PROPERTY_LIMITS, was_set);
+    }
+    PropertyLimitsSuspender(const PropertyLimitsSuspender&) = delete;
+    PropertyLimitsSuspender& operator=(const PropertyLimitsSuspender&) = delete;
+
+   private:
+    bool was_set;
+};
+
 /// Per-FIELD comparison tally.  GERGReferenceValues.h nulls fields
 /// independently (a row can have finite p and c_v but NaN w), so a NaN must
 /// skip that ONE comparison, never the whole row.  Counting both halves and
 /// pinning the totals in the test below means a reference field that silently
 /// turns into a NaN shows up as a failing count rather than as a quietly
 /// weakened gate.
+///
+/// nan_skipped is broken out PER FIELD (nan_skipped_w etc), not just totalled,
+/// because a cross-field total is a hazard by itself: if a NaN ever migrated
+/// from `w` on one row to, say, `p` on another (a generator bug, or a field
+/// getting swapped), the TOTAL nan_skipped would stay unchanged while a `p`
+/// comparison silently stopped happening -- and the test below would stay
+/// green throughout. Pinning nan_skipped_p == 0 (etc) separately from
+/// nan_skipped_w == <the known count> is what would catch that.
 struct RefTally
 {
     std::size_t compared = 0;
-    std::size_t nan_skipped = 0;
     std::size_t rows = 0;
+    std::size_t nan_skipped_alphar = 0;
+    std::size_t nan_skipped_alphaig = 0;
+    std::size_t nan_skipped_p = 0;
+    std::size_t nan_skipped_cvmolar = 0;
+    std::size_t nan_skipped_w = 0;
 };
 
 /// Compare one field, or record that the reference value is NaN.
@@ -470,10 +509,14 @@ struct RefTally
 /// a failure cannot be attributed to a field, which is exactly the information
 /// needed to localize a regression (an alphaig-only failure means the
 /// ideal-gas constants; a p-only failure means R_u; and so on).
+///
+/// `nan_counter` is the PER-FIELD counter (tally.nan_skipped_w, etc) the
+/// caller selects -- see the RefTally comment above for why the total alone
+/// is not enough.
 template <typename F>
-void check_field(const char* label, double reference, F&& computed, double rel_tol, RefTally& tally) {
+void check_field(const char* label, double reference, F&& computed, double rel_tol, std::size_t& nan_counter, RefTally& tally) {
     if (std::isnan(reference)) {
-        ++tally.nan_skipped;
+        ++nan_counter;
         return;
     }
     ++tally.compared;
@@ -504,11 +547,11 @@ void compare_pure_points(const std::string& backend, const std::vector<CoolProp:
         // alphaig is the ONLY assertion here that can see a wrong ideal-gas
         // integration constant, a missing R*/R or a negated cosh coefficient:
         // p, c_v and w are all blind to those.
-        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
-        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
-        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
-        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
-        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally.nan_skipped_alphar, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally.nan_skipped_alphaig, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally.nan_skipped_p, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally.nan_skipped_cvmolar, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally.nan_skipped_w, tally);
     }
 }
 
@@ -568,11 +611,11 @@ void compare_mix_points(const std::string& backend, const std::vector<CoolProp::
         // the pure branch, and an error in it (e.g. the spurious Tc,i/Tr
         // factor the GERG2004Sinh/Cosh terms would introduce) moves alphaig
         // while leaving alphar and p exactly right.
-        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally);
-        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally);
-        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally);
-        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally);
-        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally);
+        check_field("alphar", pt.alphar, [&] { return AS->alphar(); }, 1e-12, tally.nan_skipped_alphar, tally);
+        check_field("alphaig", pt.alphaig, [&] { return AS->alpha0(); }, 1e-12, tally.nan_skipped_alphaig, tally);
+        check_field("p", pt.p_Pa, [&] { return AS->p(); }, 1e-10, tally.nan_skipped_p, tally);
+        check_field("cvmolar", pt.cvmolar, [&] { return AS->cvmolar(); }, 1e-10, tally.nan_skipped_cvmolar, tally);
+        check_field("w", pt.w, [&] { return AS->speed_sound(); }, 1e-10, tally.nan_skipped_w, tally);
     }
 }
 
@@ -580,21 +623,32 @@ void compare_mix_points(const std::string& backend, const std::vector<CoolProp::
 
 TEST_CASE("GERG pure fluids reproduce teqp", "[GERG]") {
     using namespace CoolProp::GERG::reference;
+    PropertyLimitsSuspender suspend_limits;
 
     RefTally t2004;
     compare_pure_points("GERG2004", pure_points_2004, t2004);
     // 18 GERG-2004 components x 16 (T, rho) grid points, 5 fields each.
     // 23 of the 288 w values are NaN (mechanically unstable branch); no
-    // alphar/alphaig/p/cv value is.
+    // alphar/alphaig/p/cv value is. Pinned per field, not as a 23-total, so a
+    // NaN migrating from w to (say) p on a different row cannot hide behind an
+    // unchanged total -- it would show up as nan_skipped_p != 0 here.
     CHECK(t2004.rows == 288);
-    CHECK(t2004.nan_skipped == 23);
+    CHECK(t2004.nan_skipped_alphar == 0);
+    CHECK(t2004.nan_skipped_alphaig == 0);
+    CHECK(t2004.nan_skipped_p == 0);
+    CHECK(t2004.nan_skipped_cvmolar == 0);
+    CHECK(t2004.nan_skipped_w == 23);
     CHECK(t2004.compared == 288 * 5 - 23);
 
     RefTally t2008;
     compare_pure_points("GERG2008", pure_points_2008, t2008);
     // 21 GERG-2008 components x 16 grid points; 27 NaN w values.
     CHECK(t2008.rows == 336);
-    CHECK(t2008.nan_skipped == 27);
+    CHECK(t2008.nan_skipped_alphar == 0);
+    CHECK(t2008.nan_skipped_alphaig == 0);
+    CHECK(t2008.nan_skipped_p == 0);
+    CHECK(t2008.nan_skipped_cvmolar == 0);
+    CHECK(t2008.nan_skipped_w == 27);
     CHECK(t2008.compared == 336 * 5 - 27);
 }
 
@@ -743,6 +797,7 @@ TEST_CASE("GERG backend rejects an empty component list", "[GERG]") {
 
 TEST_CASE("GERG mixtures reproduce teqp", "[GERG]") {
     using namespace CoolProp::GERG::reference;
+    PropertyLimitsSuspender suspend_limits;
 
     std::size_t trimmed_2004 = 0, trimmed_2008 = 0;
 
@@ -753,7 +808,11 @@ TEST_CASE("GERG mixtures reproduce teqp", "[GERG]") {
     // the 153 w values are NaN (spinodal branch); alphar/alphaig/p/cv never
     // are, which the generator asserts at generation time.
     CHECK(t2004.rows == 153);
-    CHECK(t2004.nan_skipped == 19);
+    CHECK(t2004.nan_skipped_alphar == 0);
+    CHECK(t2004.nan_skipped_alphaig == 0);
+    CHECK(t2004.nan_skipped_p == 0);
+    CHECK(t2004.nan_skipped_cvmolar == 0);
+    CHECK(t2004.nan_skipped_w == 19);
     CHECK(t2004.compared == 153 * 5 - 19);
     // Every binary-pair row is a genuine two-component mixture with both mole
     // fractions nonzero, so none of them may be trimmed.
@@ -763,7 +822,11 @@ TEST_CASE("GERG mixtures reproduce teqp", "[GERG]") {
     compare_mix_points("GERG2008", mix_points_2008, t2008, trimmed_2008);
     // C(21,2) = 210 binary pairs + 187 AGA8 natural-gas compositions; 40 NaN w.
     CHECK(t2008.rows == 210 + 187);
-    CHECK(t2008.nan_skipped == 40);
+    CHECK(t2008.nan_skipped_alphar == 0);
+    CHECK(t2008.nan_skipped_alphaig == 0);
+    CHECK(t2008.nan_skipped_p == 0);
+    CHECK(t2008.nan_skipped_cvmolar == 0);
+    CHECK(t2008.nan_skipped_w == 40);
     CHECK(t2008.compared == (210 + 187) * 5 - 40);
     // All 187 AGA8 rows carry all 21 component names, most of them with a zero
     // mole fraction, and are trimmed; none of the 210 binary-pair rows is.
@@ -976,6 +1039,127 @@ TEST_CASE("GERG-2004 and GERG-2008 disagree where the models disagree", "[GERG]"
             CHECK(m4->T_reducing() != m8->T_reducing());
         }
     }
+}
+
+// ###########################################################################
+// Task 10: strictness.  Every guard below is verified by mutation -- see
+// task-10-report.md for exactly which assertion fails, and how many, when the
+// guard is removed.
+// ###########################################################################
+
+TEST_CASE("GERG rejects components outside the model", "[GERG]") {
+    CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{"R134a"}), CoolProp::ValueError);
+    CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane", "R134a"}), CoolProp::ValueError);
+    CHECK_THROWS_AS(AbstractState::factory("GERG2004", std::vector<std::string>{"n-Decane"}), CoolProp::ValueError);
+    CHECK_NOTHROW(AbstractState::factory("GERG2008", std::vector<std::string>{"n-Decane"}));
+}
+
+TEST_CASE("GERG rejects a name CoolProp cannot resolve at all", "[GERG]") {
+    // Distinct from "known to CoolProp but outside the GERG set" above: this
+    // name fails even the CAS lookup resolve_component falls back to.
+    CHECK_THROWS_AS(AbstractState::factory("GERG2008", std::vector<std::string>{"NOT A FLUID"}), CoolProp::ValueError);
+}
+
+TEST_CASE("GERG refuses transport properties", "[GERG]") {
+    // AbstractState::viscosity()/conductivity()/surface_tension()
+    // (AbstractState.cpp:793-813) each do `if (!_cached) _cached = calc_*();
+    // return _cached;` -- there is no separate cache that could satisfy the
+    // call without invoking calc_viscosity() etc, so overriding the calc_*
+    // hook alone is sufficient here (task-10-brief.md hazard 3).  This test
+    // is what a mutation deleting one of the three overrides would fail:
+    // without the override, these three calls would return CoolProp's own
+    // (non-GERG) transport-correlation numbers instead of throwing.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    AS->update(DmolarT_INPUTS, 5000.0, 200.0);
+    CHECK_THROWS_AS(AS->viscosity(), CoolProp::NotImplementedError);
+    CHECK_THROWS_AS(AS->conductivity(), CoolProp::NotImplementedError);
+    CHECK_THROWS_AS(AS->surface_tension(), CoolProp::NotImplementedError);
+}
+
+TEST_CASE("GERG refuses binary interaction parameter mutation through every public route", "[GERG]") {
+    // AbstractState declares FOUR public mutator routes to the BIPs:
+    // index-keyed and CAS-keyed set_binary_interaction_double, and the same
+    // pair for set_binary_interaction_string (AbstractState.h:950-965).
+    // HelmholtzEOSMixtureBackend overrides only the two index-keyed ones
+    // (HelmholtzEOSMixtureBackend.h:217,223); the two CAS-keyed overloads
+    // fall through, UNOVERRIDDEN by this class too, to AbstractState's own
+    // default body, which already throws NotImplementedError unconditionally.
+    // All four are exercised here so that a future HelmholtzEOSMixtureBackend
+    // change that overrides the CAS-keyed forms (and answers from the global
+    // BIP library) would flip this test's exception type/outcome instead of
+    // reopening the hole silently.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane", "Nitrogen"}));
+    CHECK_THROWS_AS(AS->set_binary_interaction_double(0, 1, "betaT", 1.1), CoolProp::ValueError);
+    CHECK_THROWS_AS(AS->set_binary_interaction_double(0, 1, "gammaV", 1.1), CoolProp::ValueError);
+    CHECK_THROWS_AS(AS->set_binary_interaction_string(0, 1, "betaT", "1.1"), CoolProp::ValueError);
+    // "betaT" is not a string set_binary_interaction_string understands even
+    // in the INHERITED HelmholtzEOSMixtureBackend implementation (it only
+    // recognises "function"), so that call above would throw ValueError even
+    // WITHOUT this backend's override -- it does not, by itself, prove the
+    // override does anything. "function" is the parameter that matters: the
+    // inherited body resolves it through get_departure_function(value)
+    // against CoolProp's mixture-departure-function LIBRARY
+    // (MixtureParameters.cpp:513), and "Methane-Nitrogen" is a real entry in
+    // that library (dev/mixtures/mixture_departure_functions.json) -- so
+    // without the override this call would SUCCEED and silently swap in a
+    // library departure function for the pair, exactly the kind of
+    // substitution set_mixture_parameters exists to prevent.
+    CHECK_THROWS_AS(AS->set_binary_interaction_string(0, 1, "function", "Methane-Nitrogen"), CoolProp::ValueError);
+    CHECK_THROWS_AS(AS->set_binary_interaction_double("74-82-8", "7727-37-9", "betaT", 1.1), CoolProp::NotImplementedError);
+    CHECK_THROWS_AS(AS->set_binary_interaction_string("74-82-8", "7727-37-9", "betaT", "1.1"), CoolProp::NotImplementedError);
+
+    // apply_simple_mixing_rule is a fifth nominal route
+    // (HelmholtzEOSMixtureBackend.cpp:383): it calls
+    // set_binary_interaction_double(i, j, ...) UNQUALIFIED, so virtual
+    // dispatch already sends it through the index-keyed override above with
+    // no separate override needed. Covered explicitly so a refactor that
+    // routes apply_simple_mixing_rule around virtual dispatch (e.g. calling
+    // HelmholtzEOSMixtureBackend::set_binary_interaction_double directly)
+    // would be caught here.
+    CHECK_THROWS_AS(AS->apply_simple_mixing_rule(0, 1, "linear"), CoolProp::ValueError);
+
+    // Known, documented, NOT-closed bypass (task-10-brief.md hazard 2):
+    // `Reducing` is a PUBLIC member of HelmholtzEOSMixtureBackend
+    // (HelmholtzEOSMixtureBackend.h:147), so a caller holding a
+    // HelmholtzEOSMixtureBackend* can reach the reducing function directly
+    // and mutate it in place, bypassing every guard above. This is not a
+    // guard this backend can close (see GERGBackend.h for why) -- asserted
+    // here so the limitation is pinned rather than merely claimed in a
+    // comment: if `Reducing` were ever made non-public, or a GERG-specific
+    // ReducingFunction subclass were added that itself refuses mutation, this
+    // assertion would need to flip, which is the point.
+    auto* heos = dynamic_cast<HelmholtzEOSMixtureBackend*>(AS.get());
+    REQUIRE(heos != nullptr);
+    CHECK_NOTHROW(heos->Reducing->set_binary_interaction_double(0, 1, "betaT", 1.1));
+}
+
+TEST_CASE("GERG fluids carry no superancillary", "[GERG]") {
+    // Load-bearing, not cosmetic: FlashRoutines::sat_superanc_path_applies
+    // (FlashRoutines.cpp:558) routes pure-fluid saturation straight to the
+    // Chebyshev expansion and returns THAT as the answer for any pure fluid
+    // that owns one. A GERG fluid carrying CoolProp's superancillary blob
+    // (e.g. by construction ever changing to build one from the CoolProp
+    // fluid library instead of leaving it null) would silently return
+    // Setzmann-Wagner-class saturation densities labelled GERG-2008 -- with
+    // no error anywhere, since the superancillary path is a deliberate
+    // shortcut, not a bug.
+    auto* gerg = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    std::shared_ptr<CoolProp::HelmholtzEOSMixtureBackend> holder(gerg);
+    CHECK(holder->get_superanc() == nullptr);
+}
+
+TEST_CASE("GERG respects its range of validity", "[GERG]") {
+    // The range guard is CoolProp's ordinary EOS.limits.Tmin/Tmax machinery
+    // (make_gerg_fluid, GERGBackend.cpp), gated behind the
+    // DONT_CHECK_PROPERTY_LIMITS configuration key (default false -- checks
+    // ARE performed). Asserted explicitly here (task-10-brief.md hazard 4)
+    // rather than merely assumed, so this test cannot pass only because some
+    // earlier test in the same binary left the global config flipped.
+    REQUIRE(CoolProp::get_config_bool(DONT_CHECK_PROPERTY_LIMITS) == false);
+
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    CHECK_THROWS(AS->update(PT_INPUTS, 1e5, 40.0));   // below Tmin = 60 K
+    CHECK_THROWS(AS->update(PT_INPUTS, 1e5, 900.0));  // above Tmax = 700 K
 }
 
 #endif /* ENABLE_CATCH */
