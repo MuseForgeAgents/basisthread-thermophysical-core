@@ -147,25 +147,51 @@ def models(year, names):
     return resid, ideal
 
 
+def _safe(fn):
+    """Evaluate a zero-arg thunk, returning NaN (never raising) if it either
+    raises or returns a non-finite value.  Used so that ONE quantity failing
+    at a given (T, rho) -- e.g. w blowing up on the mechanically-unstable
+    branch -- never prevents the OTHER quantities computed at the exact same
+    state from being reported."""
+    try:
+        v = fn()
+    except Exception:
+        return float("nan")
+    return v if math.isfinite(v) else float("nan")
+
+
 def point(resid, ideal, z, T, rho, M):
     """(alphar, alphaig, p_Pa, cv_JmolK, w_ms) at (T, rho) for composition z
     and mixture molar mass M (kg/mol).  Mirrors teqp's own test file exactly
-    (catch_test_GERG.cxx:675-694); may raise or return non-finite values for
-    unphysical (T, rho) combinations, which callers are expected to catch."""
-    z = np.asarray(z, dtype=float)
-    Ar00 = resid.get_Ar00(T, rho, z)
-    Ar01 = resid.get_Ar01(T, rho, z)  # delta * dalphar/ddelta
-    Ar02 = resid.get_Ar02(T, rho, z)  # delta^2 * d2alphar/ddelta^2
-    Ar11 = resid.get_Ar11(T, rho, z)  # delta*tau * d2alphar/(ddelta dtau)
-    Ar20 = resid.get_Ar20(T, rho, z)  # tau^2 * d2alphar/dtau^2
-    Aig00 = ideal.get_Ar00(T, rho, z)
-    Aig20 = ideal.get_Ar20(T, rho, z)
+    (catch_test_GERG.cxx:675-694).
 
-    p = rho * R * T * (1.0 + Ar01)
-    cv = -(Aig20 + Ar20) * R
-    with np.errstate(invalid="ignore", divide="ignore"):
-        w2 = (R * T / M) * (1 + 2 * Ar01 + Ar02 - (1 + Ar01 - Ar11) ** 2 / (Aig20 + Ar20))
-        w = math.sqrt(w2) if w2 > 0 else float("nan")
+    Each of the 5 returned values is computed and null'd to NaN
+    INDEPENDENTLY -- never by discarding the whole point.  w legitimately
+    goes NaN on the mechanically-unstable branch (w^2 < 0) while p and cv
+    stay perfectly finite at the exact same (T, rho); the pure-fluid grid
+    used to drop the WHOLE row whenever any single one of the 5 values was
+    non-finite, which silently threw away ~50 perfectly good p/cv fixture
+    points clustered right at the near-phase-boundary states where a wiring
+    bug is most likely to show up (see dev/gerg/README.md). Callers must
+    NOT drop a row because one field is NaN; keep the row, null just that
+    field, and let downstream consumers skip per-field."""
+    z = np.asarray(z, dtype=float)
+    Ar00 = _safe(lambda: resid.get_Ar00(T, rho, z))
+    Ar01 = _safe(lambda: resid.get_Ar01(T, rho, z))  # delta * dalphar/ddelta
+    Ar02 = _safe(lambda: resid.get_Ar02(T, rho, z))  # delta^2 * d2alphar/ddelta^2
+    Ar11 = _safe(lambda: resid.get_Ar11(T, rho, z))  # delta*tau * d2alphar/(ddelta dtau)
+    Ar20 = _safe(lambda: resid.get_Ar20(T, rho, z))  # tau^2 * d2alphar/dtau^2
+    Aig00 = _safe(lambda: ideal.get_Ar00(T, rho, z))
+    Aig20 = _safe(lambda: ideal.get_Ar20(T, rho, z))
+
+    p = rho * R * T * (1.0 + Ar01) if math.isfinite(Ar01) else float("nan")
+    cv = -(Aig20 + Ar20) * R if all_finite(Aig20, Ar20) else float("nan")
+    w = float("nan")
+    if all_finite(Ar01, Ar02, Ar11, Aig20, Ar20):
+        with np.errstate(invalid="ignore", divide="ignore"):
+            w2 = (R * T / M) * (1 + 2 * Ar01 + Ar02 - (1 + Ar01 - Ar11) ** 2 / (Aig20 + Ar20))
+        if math.isfinite(w2) and w2 > 0:
+            w = math.sqrt(w2)
     return Ar00, Aig00, p, cv, w
 
 
@@ -177,11 +203,22 @@ def all_finite(*vals):
 # Pure-fluid grid
 # ---------------------------------------------------------------------------
 
+# Every fluid is expected to retain a finite alphar at (nearly) all 16 grid
+# points -- alphar (teqp's get_Ar00) is the most basic quantity computed (a
+# single function evaluation, no ratio/subtraction that can blow up the way
+# w's does near the mechanically-unstable branch) and should only go
+# non-finite when teqp's underlying solver itself gives up, not from benign
+# near-phase-boundary cancellation. This is a PER-FLUID floor, not a global
+# total, precisely so one fluid failing broadly cannot hide behind other
+# fluids that happen to have full coverage (see dev/gerg/README.md).
+MIN_FINITE_ALPHAR_PER_FLUID = 14  # of 16; see README for the empirical basis
+
 
 def pure_points(year, names):
-    resid_cache = {}
     rows = []
-    skipped = []
+    # Per-fluid, per-field counts of NaN'd (non-finite) values, for the
+    # coverage summary -- NOT for dropping rows; see point()'s docstring.
+    field_nulls = {name: {"alphar": 0, "alphaig": 0, "p": 0, "cv": 0, "w": 0} for name in names}
     for name in names:
         Tc, rhoc, M = pure_info_si(year, name)
         resid, ideal = models(year, [name])
@@ -194,23 +231,29 @@ def pure_points(year, names):
         assert abs(Tc_teqp - Tc) <= 1e-9 * Tc, f"{year}/{name}: Tc mismatch {Tc_teqp} vs {Tc}"
         assert abs(rhoc_teqp - rhoc) <= 1e-9 * rhoc, f"{year}/{name}: rhoc mismatch {rhoc_teqp} vs {rhoc}"
 
-        n_ok = 0
+        n_alphar_finite = 0
         for Tfac in (0.7, 1.0, 1.3, 2.0):
             for rfac in (0.01, 0.5, 1.5, 2.5):
                 T = Tfac * Tc
                 rho = rfac * rhoc
-                try:
-                    Ar00, Aig00, p, cv, w = point(resid, ideal, [1.0], T, rho, M)
-                except Exception:
-                    skipped.append((name, Tfac, rfac))
-                    continue
-                if not all_finite(Ar00, Aig00, p, cv, w):
-                    skipped.append((name, Tfac, rfac))
-                    continue
+                Ar00, Aig00, p, cv, w = point(resid, ideal, [1.0], T, rho, M)
+                for label, val in (("alphar", Ar00), ("alphaig", Aig00), ("p", p), ("cv", cv), ("w", w)):
+                    if not math.isfinite(val):
+                        field_nulls[name][label] += 1
+                if math.isfinite(Ar00):
+                    n_alphar_finite += 1
+                # ALWAYS keep the row -- individual fields may be NaN (see
+                # point()'s docstring); do not drop it because one field
+                # failed while the fixed grid still deterministically
+                # produces 16 rows/fluid.
                 rows.append((name, T, rho, Ar00, Aig00, p, cv, w))
-                n_ok += 1
-        resid_cache[name] = n_ok
-    return rows, skipped
+
+        assert n_alphar_finite >= MIN_FINITE_ALPHAR_PER_FLUID, (
+            f"{year}/{name}: only {n_alphar_finite}/16 grid points have a finite alphar -- "
+            "this fluid is failing broadly (not just isolated near-phase-boundary points); "
+            "investigate before shipping, do not silently ship a near-empty fluid."
+        )
+    return rows, field_nulls
 
 
 # ---------------------------------------------------------------------------
@@ -335,33 +378,73 @@ def emit_mix(rows, varname, out):
 
 
 def main():
-    pure_2004, skip_2004 = pure_points(2004, GERG2004_NAMES)
-    pure_2008, skip_2008 = pure_points(2008, GERG2008_NAMES)
+    pure_2004, nulls_2004 = pure_points(2004, GERG2004_NAMES)
+    pure_2008, nulls_2008 = pure_points(2008, GERG2008_NAMES)
     bin_2004, binskip_2004, nanw_2004 = binary_pair_points(2004, GERG2004_NAMES)
     bin_2008, binskip_2008, nanw_2008 = binary_pair_points(2008, GERG2008_NAMES)
     aga8_rows, aga8_skip, aga8_nanw, p_reldiffs = aga8_points()
 
     mix_2008 = bin_2008 + aga8_rows
 
+    # --- Coverage assertions: fail loudly instead of silently shipping a
+    # header with a missing reducing-parameter row or AGA8 gas. Task 5's
+    # review established that a single mistyped digit in one of the 225
+    # reducing-parameter rows (153 GERG-2004 + 72 GERG-2008-override) is
+    # guarded by NOTHING except these binary-pair points existing and being
+    # numerically checked in Task 8/9 -- a pair silently vanishing from the
+    # header (e.g. a future teqp bump making it evaluate non-finite instead
+    # of finite-but-wrong) would remove that row's only guard while leaving
+    # every test green. See dev/gerg/README.md.
+    n_pairs_2004 = len(GERG2004_NAMES) * (len(GERG2004_NAMES) - 1) // 2
+    n_pairs_2008 = len(GERG2008_NAMES) * (len(GERG2008_NAMES) - 1) // 2
+    assert n_pairs_2004 == 153, f"GERG2004_NAMES has {len(GERG2004_NAMES)} names -> C(n,2)={n_pairs_2004}, expected 153"
+    assert n_pairs_2008 == 210, f"GERG2008_NAMES has {len(GERG2008_NAMES)} names -> C(n,2)={n_pairs_2008}, expected 210"
+    assert len(bin_2004) == n_pairs_2004, (
+        f"mix_points_2004 has {len(bin_2004)} binary-pair rows, expected exactly {n_pairs_2004} "
+        f"-- {len(binskip_2004)} pair(s) dropped: {binskip_2004}. A missing pair removes the ONLY "
+        "numeric guard on that reducing-parameter row; investigate, do not ship."
+    )
+    assert len(bin_2008) == n_pairs_2008, (
+        f"mix_points_2008 binary pairs: {len(bin_2008)} rows, expected exactly {n_pairs_2008} "
+        f"-- {len(binskip_2008)} pair(s) dropped: {binskip_2008}"
+    )
+    assert len(aga8_rows) == len(VALIDATION_DATA) == 187, (
+        f"AGA8 rows: {len(aga8_rows)} emitted from {len(VALIDATION_DATA)} validation_data entries, "
+        f"expected 187 of both -- {len(aga8_skip)} gas(es) dropped: {aga8_skip}"
+    )
+
     reldiffs_sorted = sorted(p_reldiffs)
     worst_reldiff, worst_gasno = reldiffs_sorted[-1]
     median_reldiff = reldiffs_sorted[len(reldiffs_sorted) // 2][0]
     n_over_1e6 = sum(1 for d, _ in p_reldiffs if d > 1e-6)
 
+    def null_summary(nulls, names):
+        totals = {"alphar": 0, "alphaig": 0, "p": 0, "cv": 0, "w": 0}
+        for name in names:
+            for k in totals:
+                totals[k] += nulls[name][k]
+        return ", ".join(f"{k}={v}" for k, v in totals.items())
+
     report = [
-        f"# pure_points_2004: {len(pure_2004)} emitted, {len(skip_2004)} skipped (non-finite)",
-        f"# pure_points_2008: {len(pure_2008)} emitted, {len(skip_2008)} skipped (non-finite)",
-        f"# skipped pure (2004): {skip_2004}",
-        f"# skipped pure (2008): {skip_2008}",
-        f"# mix_points_2004 (binary pairs only): {len(bin_2004)} emitted, {len(binskip_2004)} dropped "
-        f"(p or cv non-finite), {len(nanw_2004)} with w = NaN (mechanically-unstable branch; p, cv still valid)",
+        f"# pure_points_2004: {len(pure_2004)} emitted ({len(GERG2004_NAMES)} fluids x 16 grid pts, "
+        f"floor {MIN_FINITE_ALPHAR_PER_FLUID}/16 finite alphar enforced per fluid), NaN'd-field counts: "
+        f"{null_summary(nulls_2004, GERG2004_NAMES)}",
+        f"# pure_points_2008: {len(pure_2008)} emitted ({len(GERG2008_NAMES)} fluids x 16 grid pts, "
+        f"floor {MIN_FINITE_ALPHAR_PER_FLUID}/16 finite alphar enforced per fluid), NaN'd-field counts: "
+        f"{null_summary(nulls_2008, GERG2008_NAMES)}",
+        "# No pure-fluid row is ever dropped: every field (alphar/alphaig/p/cv/w) is nulled "
+        "independently when non-finite, per point()'s docstring -- Tasks 8/9 must skip per-FIELD "
+        "(std::isnan check on that field alone), not per-row.",
+        f"# mix_points_2004 (binary pairs only): {len(bin_2004)} of {n_pairs_2004} expected emitted "
+        f"(assert enforced), {len(nanw_2004)} with w = NaN (mechanically-unstable branch; p, cv still valid)",
         f"# mix_points_2008 (binary pairs + AGA8): {len(mix_2008)} emitted "
-        f"({len(bin_2008)} pairs + {len(aga8_rows)} AGA8 gases), {len(binskip_2008)} pair-drops, "
-        f"{len(nanw_2008)} pairs with w = NaN, {len(aga8_skip)} AGA8 gas-drops, {len(aga8_nanw)} AGA8 with w = NaN",
+        f"({len(bin_2008)} of {n_pairs_2008} expected pairs + {len(aga8_rows)} of 187 expected AGA8 gases, "
+        f"both counts assert-enforced), {len(nanw_2008)} pairs with w = NaN, {len(aga8_nanw)} AGA8 with w = NaN",
         f"# AGA8 p_teqp vs validation_data.P_MPa: worst {worst_reldiff:.3e} (gas {worst_gasno}), "
         f"median {median_reldiff:.3e} across {len(p_reldiffs)} rows, {n_over_1e6} rows > 1e-6 -- see",
-        "# dev/gerg/README.md for why this is a validation_data provenance issue, not a composition/ordering bug:",
-        "# the median matches the ~1e-12 verified-correct-ordering baseline, teqp's OWN test disables this exact",
+        "# dev/gerg/README.md for why this is a table-vs-reference-code provenance issue (confirmed against",
+        "# NIST's own bundled AGA8 reference code, not just teqp), not a composition/ordering bug: the median",
+        "# matches the ~1e-12 verified-correct-ordering baseline, teqp's OWN test disables this exact",
         "# comparison (catch_test_GERG.cxx:696-698), and the worst rows are all rich, complex multi-component",
         "# natural-gas blends (CO2/H2S/He-rich), not the uniform ~2e-3 offset a swapped-column bug would produce.",
     ]
@@ -404,6 +487,13 @@ def main():
     out.append("/// `name` is the GERG component name (matches GERGData.h component_names()).")
     out.append("/// `alphar`/`alphaig` are the dimensionless residual/ideal-gas Helmholtz")
     out.append("/// energies (teqp's get_Ar00 on the resid/ideal-gas models respectively).")
+    out.append("///")
+    out.append("/// Any of alphar/alphaig/p_Pa/cvmolar/w may independently be NaN")
+    out.append("/// (std::isnan(...) true) at a given row -- e.g. w legitimately goes NaN on")
+    out.append("/// the mechanically-unstable branch while p_Pa/cvmolar stay perfectly finite")
+    out.append("/// at the exact same (T, rho). Rows are NEVER dropped for having one")
+    out.append("/// non-finite field: Task 8/9 must check std::isnan(...) per FIELD being")
+    out.append("/// compared, not skip the whole row when any single field is NaN.")
     out.append("struct PureRefPoint")
     out.append("{")
     out.append("    const char* name;")
@@ -435,12 +525,12 @@ def main():
     out.append("")
     out.append("/// Pure fluids: each of the 18 GERG-2004 / 21 GERG-2008 component EOS at")
     out.append("/// T in {0.7, 1.0, 1.3, 2.0} x Tc crossed with rho in {0.01, 0.5, 1.5, 2.5}")
-    out.append("/// x rhoc (up to 16 points per fluid; points where teqp returned a")
-    out.append("/// non-finite value are omitted -- see the generator's stderr report for")
-    out.append("/// exactly which). Together these two vectors cover all 23 distinct pure")
-    out.append("/// EOS (see dev/gerg/verify_transcription.py's Family-1 check): the 21")
-    out.append("/// GERG-2008 component names include isopentane and carbonmonoxide with")
-    out.append("/// DIFFERENT coefficients than their GERG-2004 entries.")
+    out.append("/// x rhoc -- EXACTLY 16 points per fluid, always: no row is ever dropped for")
+    out.append("/// a non-finite value (see PureRefPoint's doc comment above and the")
+    out.append("/// generator's per-field NaN-count report). Together these two vectors cover")
+    out.append("/// all 23 distinct pure EOS (see dev/gerg/verify_transcription.py's Family-1")
+    out.append("/// check): the 21 GERG-2008 component names include isopentane and")
+    out.append("/// carbonmonoxide with DIFFERENT coefficients than their GERG-2004 entries.")
     emit_pure(pure_2004, "pure_points_2004", out)
     emit_pure(pure_2008, "pure_points_2008", out)
     out.append("/// Mixtures, GERG-2004: every one of the C(18,2) = 153 binary pairs among")

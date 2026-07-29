@@ -66,6 +66,17 @@ python3 -m venv /tmp/gergenv
 uvx clang-format@18.1.8 -i src/Backends/GERG/GERGReferenceValues.h
 ```
 
+Run both commands with a CWD inside this repo, writing directly to
+`src/Backends/GERG/GERGReferenceValues.h` (or another path under the repo
+tree) — not to a scratch directory elsewhere on disk. clang-format finds
+its style by walking UP from the target file looking for `.clang-format`;
+outside the repo tree it silently falls back to a different default style
+(e.g. Allman brace-wrapping becomes attached braces) with no warning, which
+looks like nondeterminism but is really "formatted against the wrong
+config." Verified: regenerating+reformatting in place under the repo
+reproduces the committed header byte-for-byte; doing the same in `/tmp`
+does not.
+
 The clang-format pass is required, not cosmetic: the pre-PR gate runs
 `clang-format --dry-run -Werror` against every changed `.h` file, and the
 generator's own 4-space, one-point-per-line emission does not satisfy it.
@@ -80,16 +91,65 @@ flagged as an expected risk before generation, and it is exactly what
 happened: the honest trade-off is "correct but visually noisy" over adding
 a suppression convention that doesn't otherwise exist in this codebase.
 
-The generator prints a coverage/skip/cross-check summary to stderr (also
+The generator prints a coverage/cross-check summary to stderr (also
 embedded verbatim, as `//`-prefixed lines, near the top of the generated
 header) — check it after every regeneration:
 
 ```
-pure_points_2004: 265 emitted, 23 skipped (non-finite)
-pure_points_2008: 309 emitted, 27 skipped (non-finite)
-mix_points_2004 (binary pairs only): 153 emitted, 0 dropped, 19 with w = NaN
-mix_points_2008 (binary pairs + AGA8): 397 emitted (210 pairs + 187 AGA8 gases), ...
+pure_points_2004: 288 emitted (18 fluids x 16 grid pts, floor 14/16 finite alphar enforced per fluid), NaN'd-field counts: alphar=0, alphaig=0, p=0, cv=0, w=23
+pure_points_2008: 336 emitted (21 fluids x 16 grid pts, floor 14/16 finite alphar enforced per fluid), NaN'd-field counts: alphar=0, alphaig=0, p=0, cv=0, w=27
+mix_points_2004 (binary pairs only): 153 of 153 expected emitted (assert enforced), 19 with w = NaN
+mix_points_2008 (binary pairs + AGA8): 397 emitted (210 of 210 expected pairs + 187 of 187 expected AGA8 gases, both counts assert-enforced), 40 pairs with w = NaN, 0 AGA8 with w = NaN
 AGA8 p_teqp vs validation_data.P_MPa: worst 6.770e-04 (gas 193), median 3.514e-12 ...
+```
+
+### Coverage is enforced, not just reported
+
+`main()` asserts, and aborts with a descriptive message rather than
+emitting a short header, if any of the following don't hold exactly:
+
+- `len(mix_points_2004)` (binary pairs) `== 153` (`C(18,2)`)
+- binary pairs in `mix_points_2008 == 210` (`C(21,2)`)
+- AGA8 rows emitted `== len(VALIDATION_DATA) == 187`
+
+Why this matters more here than almost anywhere else in this backend: the
+Task 5 review established that a single mistyped digit in one of the 225
+binary reducing-parameter rows (153 GERG-2004 + 72 GERG-2008-override) is
+guarded by **nothing** except these binary-pair reference points existing
+and being numerically compared in Task 8/9. Before this assertion existed,
+a future regeneration (a teqp version bump, a coefficient edit) that made
+one pair evaluate to a caught exception instead of a finite-but-wrong
+number would make that pair silently vanish from the header — removing the
+only guard on that reducing-parameter row while every test stayed green.
+Now that regeneration aborts loudly instead.
+
+The pure-fluid grid gets a **per-fluid** floor instead of a global count:
+each fluid must retain a finite `alphar` (teqp's `get_Ar00`) at least
+`MIN_FINITE_ALPHAR_PER_FLUID = 14` of its 16 grid points. This is
+per-fluid, not "at least N out of 288/336 total," specifically so one
+fluid failing broadly cannot hide behind other fluids that have full
+coverage — a global total can stay comfortably above threshold even if one
+fluid degrades to near-zero usable points. In practice every fluid
+currently has all 16/16 finite (see the next section for why alphar itself
+essentially never goes non-finite); the floor is a tripwire for future
+regressions, not a currently-binding constraint.
+
+All three assertion classes were verified to actually fire: temporarily
+forcing one binary pair, one AGA8 gas, and one fluid's `alphar` to drop out
+(each on a throwaway copy of this script, never committed) independently
+raised `AssertionError`, e.g.:
+
+```
+AssertionError: mix_points_2004 has 152 binary-pair rows, expected exactly 153 -- 1 pair(s)
+dropped: [('methane', 'nitrogen')]. A missing pair removes the ONLY numeric guard on that
+reducing-parameter row; investigate, do not ship.
+
+AssertionError: AGA8 rows: 186 emitted from 187 validation_data entries, expected 187 of
+both -- 1 gas(es) dropped: [2]
+
+AssertionError: 2004/methane: only 0/16 grid points have a finite alphar -- this fluid is
+failing broadly (not just isolated near-phase-boundary points); investigate before
+shipping, do not silently ship a near-empty fluid.
 ```
 
 ### `validation_data.P_MPa` cross-check: why the worst-case row is 6.8e-4, not 1e-12
@@ -126,12 +186,22 @@ composition/ordering bug:
   `validation_data[i].P_MPa` entirely, at a 1e-5 tolerance — i.e. teqp's own
   authors already know this comparison doesn't reliably pass and disabled
   it, rather than it being an oversight in this script.
+- Independent confirmation from the Task 7 review: NIST's own bundled AGA8
+  reference implementation, re-run directly (not through teqp) against the
+  same gas-193 state, *also* disagrees with the published table value.
+  That upgrades the conclusion from "teqp disagrees with the table" to
+  "the reference C/FORTRAN code disagrees with its own published table" —
+  i.e. this is a table-vs-reference-code discrepancy in the published AGA8
+  validation data itself, not anything specific to teqp or to this
+  generator.
 
 Conclusion: `validation_data.P_MPa` is real published AGA8 measurement/
-reference data that GERG-2008 does not reproduce exactly for its most
-unusual compositions — a modeling limitation, not a transcription bug. The
-reference values Tasks 8/9 validate against come from teqp directly, not
-from this column, so this discrepancy does not propagate into the fixture.
+reference data that neither GERG-2008 (via teqp) nor NIST's own bundled
+AGA8 reference code reproduces exactly for its most unusual compositions —
+a property of the published reference table, not a transcription or
+ordering bug anywhere in this pipeline. The reference values Tasks 8/9
+validate against come from teqp directly, not from this column, so this
+discrepancy does not propagate into the fixture.
 
 ### AGA8 component ordering (load-bearing, do not "simplify")
 
@@ -173,15 +243,16 @@ namespace CoolProp { namespace GERG { namespace reference {
 
 struct PureRefPoint {
     const char* name;                                       // GERG component name
-    double T_K, rhomolar, alphar, alphaig, p_Pa, cvmolar, w; // w may be NaN, never for pure fluids in practice
+    double T_K, rhomolar, alphar, alphaig, p_Pa, cvmolar, w; // ANY field may independently be NaN
 };
 
 struct MixRefPoint {
     std::vector<const char*> names;  // parallel to z -- component order is AGA8 order for
     std::vector<double> z;           // AGA8 rows, GERGData.h component_names() order for pair rows
-    double T_K, rhomolar, p_Pa, cvmolar, w;  // w is NaN (std::isnan(w) true) on the mechanically-
-                                              // unstable branch for some binary pairs -- see the
-                                              // struct's own doc comment in the generated header.
+    double T_K, rhomolar, p_Pa, cvmolar, w;  // w may independently be NaN (see below); p_Pa/cvmolar
+                                              // are never NaN in the current data (see the pure-fluid
+                                              // note below for why the same guarantee does NOT extend
+                                              // to PureRefPoint's alphar/alphaig/p_Pa/cvmolar in general)
 };
 
 extern const std::vector<PureRefPoint> pure_points_2004, pure_points_2008;
@@ -190,10 +261,31 @@ extern const std::vector<MixRefPoint> mix_points_2004, mix_points_2008;
 }}}  // namespace CoolProp::GERG::reference
 ```
 
-`w == NaN` (`std::isnan(w)`) happens for 19/153 GERG-2004 and 40/210
-GERG-2008 binary-pair rows at the fixed (T=250K, rho=5000 mol/m^3, z=[0.4,
-0.6]) state — that state sits on the mechanically-unstable (spinodal)
-branch of the single-phase EOS for some dissimilar-component pairs, where
-`w^2 < 0`. `p_Pa`/`cvmolar` remain finite and meaningful there; Task 9 must
-compare them unconditionally and skip only the `w` comparison when
-`std::isnan(w)` is true for that row.
+**Per-FIELD nulling, not per-row dropping (load-bearing contract for Tasks
+8-9).** Every field of both structs is computed and null'd to NaN
+*independently*. No row is ever dropped because one field came out
+non-finite. Concretely:
+
+- `pure_points_2004`/`pure_points_2008` contain **exactly** 16 rows per
+  fluid (4 T-factors x 4 rho-factors), always — nothing is ever omitted
+  from the grid. In the currently-committed header, `alphar`, `alphaig`,
+  `p_Pa`, and `cvmolar` are finite on **every single one** of the 624 pure
+  rows; only `w` is ever NaN (23/288 rows in `pure_points_2004`, 27/336 in
+  `pure_points_2008`), always at `T = 0.7 x Tc` combined with `rho = 0.5 x
+  rhoc` or `1.5 x rhoc` — i.e. exactly where the 0.7-Tc isotherm is likely
+  to cross the two-phase dome, putting that state on the
+  mechanically-unstable branch where `w^2 < 0`, the same phenomenon
+  described for mixtures below. An earlier version of this generator
+  dropped the WHOLE row whenever ANY of the 5 fields was non-finite,
+  which — since only `w` was ever actually the culprit — silently threw
+  away ~50 perfectly good `p_Pa`/`cvmolar` points clustered in exactly the
+  near-phase-boundary region where a wiring bug is most likely to show up.
+  **Tasks 8/9 must check `std::isnan(...)` per field being compared, not
+  skip the whole row when any single field is NaN.**
+- `w == NaN` (`std::isnan(w)`) happens for 19/153 GERG-2004 and 40/210
+  GERG-2008 binary-pair rows at the fixed (T=250K, rho=5000 mol/m^3,
+  z=[0.4, 0.6]) state — that state sits on the mechanically-unstable
+  (spinodal) branch of the single-phase EOS for some dissimilar-component
+  pairs, where `w^2 < 0`. `p_Pa`/`cvmolar` remain finite and meaningful
+  there; Task 9 must compare them unconditionally and skip only the `w`
+  comparison when `std::isnan(w)` is true for that row.
