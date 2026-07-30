@@ -1,7 +1,7 @@
 # GERG-2004/GERG-2008 developer tooling
 
-Two standalone developer scripts supporting the strict GERG-2004/GERG-2008
-backend (`src/Backends/GERG/`). Neither is invoked by CMakeLists.txt or CTest
+Three standalone developer scripts supporting the strict GERG-2004/GERG-2008
+backend (`src/Backends/GERG/`). None is invoked by CMakeLists.txt or CTest
 — CoolProp's build has no dependency on `teqp` and never will; these are
 one-off, by-hand tools you re-run after touching the GERG tables or after a
 `teqp` upgrade.
@@ -311,3 +311,183 @@ non-finite. Concretely:
   pairs, where `w^2 < 0`. `p_Pa`/`cvmolar` remain finite and meaningful
   there; Task 9 must compare them unconditionally and skip only the `w`
   comparison when `std::isnan(w)` is true for that row.
+
+
+## `fit_ancillaries.py` — saturation ancillaries (Task 11)
+
+Traces the saturation curve of each of the **23 distinct pure GERG EOS** with
+`teqp`, regresses CoolProp's standard ancillary forms against it, and emits
+`src/Backends/GERG/GERGAncillaries.h`.
+
+23, not 21: the GERG-2008 component list has 21 fluids, and GERG-2008 changed
+the reducing parameters of **carbon monoxide** and **isopentane** relative to
+GERG-2004 (`GERGData.h`, `pure_info_2008_overrides`). Changed reducing
+parameters move the whole saturation curve, so those two need one fit per
+model. The generated table is therefore a GERG-2004 base of 18 plus a
+GERG-2008 override set of 5 — the same base-plus-overrides shape
+`get_pure_info` uses.
+
+### These are fitted against the GERG pure EOS, and MUST be refitted if a coefficient table changes
+
+CoolProp already ships saturation ancillaries for every fluid GERG names, and
+they would work perfectly well as VLE seeds — which is precisely the trap.
+They belong to each fluid's **reference** equation of state (Setzmann-Wagner
+for methane, Span-Wagner for carbon dioxide, IAPWS-95 for water), not to
+GERG's shortened technical form. A backend named GERG-2004/GERG-2008 must not
+carry data traceable to a different equation, with nothing anywhere to say so.
+
+Consequently: **editing any pure-fluid `n`/`t`/`d`/`l` row, or any Table A3.5
+reducing parameter, invalidates the corresponding ancillary.** Re-run this
+script. Nothing in the build detects the staleness for you; what would catch it
+is the `[GERG]` test *GERG ancillaries are close to the converged saturation
+state*, which compares each fit against a freshly converged GERG saturation
+state at five temperatures per fluid using that fit's own recorded
+`max_rel_dev` as the tolerance.
+
+### An ancillary is a seed, not an answer
+
+`FlashRoutines::QT_flash` hands `rhoL`/`rhoV`/`pV` to
+`SaturationSolvers::saturation_T_pure_Maxwell`, which iterates to the true GERG
+saturation state; no ancillary value is ever returned to a caller. The
+`[GERG]` test *GERG saturation is independent of the ancillary seed* pins this
+by perturbing all three ancillaries by ±1% (about three times the worst fit
+deviation in the shipped table) and requiring the converged answer not to move
+beyond 1e-9 relative.
+
+This is also why **no superancillary may ever be attached to a GERG fluid**.
+`FlashRoutines::sat_superanc_path_applies` (`FlashRoutines.cpp:558`) routes
+pure-fluid saturation straight to the Chebyshev expansion and *returns that as
+the answer*, so a GERG fluid carrying CoolProp's blob would silently report
+Setzmann-Wagner saturation densities labelled GERG-2008. `make_gerg_fluid`
+never calls `set_superancillaries_str`; the test *GERG carries no
+superancillary but does carry the saturation end states* pins it.
+
+### Schema, and why every fit carries a `t = 0` term
+
+The emitted rows use the same schema as `dev/fluids/*.json`'s `ANCILLARIES`
+block, so `make_gerg_fluid` builds a plain CoolProp `SaturationAncillaryFunction`
+from each one (through `SaturationAncillaryFunction::Values`, the same bundle
+`cpjson::make_saturation_ancillary` fills from JSON) and the shipped evaluator
+in `Ancillaries.cpp` is the only evaluator:
+
+| slot   | `type`        | `using_tau_r` | form                                            |
+|--------|---------------|---------------|-------------------------------------------------|
+| `rhoL` | `rhoLnoexp`   | false         | `reducing_value * (1 + sum n_i theta^t_i)`       |
+| `rhoV` | `rhoV`        | true          | `reducing_value * exp(T_r/T * sum n_i theta^t_i)`|
+| `pV`   | `pV`          | true          | `reducing_value * exp(T_r/T * sum n_i theta^t_i)`|
+
+with `theta = 1 - T/T_r`.
+
+For most CoolProp fluids the ancillary reducing point **is** the EOS critical
+point, so `rhoL(Tc) = rhoV(Tc) = rhoc` and `p(Tc) = pc` fall out of the form
+for free (`theta = 0` kills every `t > 0` term). **That is not true for GERG.**
+Table A3.5's reducing parameters are fitted quantities, and the true critical
+point of the shortened form — located with `teqp`'s own critical solver — can
+sit a long way from them:
+
+| fluid       | `Tc(true) - T_reduce` | `rhoc(true)/rho_reduce - 1` |
+|-------------|-----------------------|------------------------------|
+| n-heptane   | +1.096 K              | -3.06%                       |
+| n-butane    | +0.634 K              | -5.43%                       |
+| isopentane (2004) | +0.381 K        | +3.35%                       |
+| n-octane    | +0.250 K              | -3.10%                       |
+| propane     | +0.114 K              | -3.25%                       |
+| oxygen      | +0.114 K              | -3.73%                       |
+| argon       | +0.104 K              | -2.81%                       |
+| isobutane   | -0.067 K              | -3.16%                       |
+
+So a `theta^0` term is included in every fit, leaving the value at `T = T_r`
+a free fitted parameter instead of pinning it to the tabulated reducing value.
+
+`T_r = max(Tc(true), T_reduce)`, and the maximum is load-bearing both ways:
+
+- It can never be **below** the tabulated reducing temperature, because
+  `SaturationAncillaryFunction::evaluate` returns NaN for `T > T_r` (guarding
+  `pow(negative, fractional)`, GitHub #1611) while `QT_flash`'s upper
+  saturation bound is the backend's `T_critical()`, i.e. the tabulated value.
+- Where `Tc(true)` is the **higher** of the pair, using it puts `theta = 0`
+  exactly at the end of the saturation curve, which is what makes the
+  classical `theta^(1/2)` scaling representable. Pinning `theta = 0` 1.1 K
+  short of the critical point instead leaves a square-root branch point inside
+  the fit domain and costs an order of magnitude: propane fitted 7.3e-3 that
+  way versus 1.4e-3 with `T_r = Tc(true)`.
+
+`reducing_value` stays the **tabulated** reducing density, and for `pV` the
+pressure evaluated from the EOS at the tabulated reducing state — the same
+number `make_gerg_fluid` stores in `EOS.reduce.p` and the backend reports as
+`p_critical()`.
+
+### Method
+
+1. **Trace.** From `theta = 1e-4` below the true critical temperature down to
+   `max(0.30*Tc, T where p_sat < 1e-3 Pa)`, 250 points geometric in `theta`.
+   Each step is seeded from the previous one (the technique
+   `~/Code/fastchebpure`'s `fastcheb.cpp` uses), with a guess-free fallback
+   that cannot be stranded by a bad seed: scan for the two spinodal densities,
+   bisect on `p` between them with equal chemical potential as the residual,
+   then polish with a damped 2-D Newton on `(rhoL, rhoV)`.
+   The `1e-3 Pa` floor and the `0.30*Tc` floor are **numerical**, not
+   statements about where the GERG EOS stops being valid.
+2. **Regress.** Once the exponents are fixed each ancillary is linear in `n`,
+   so the exponents come from greedy forward selection over a pre-spaced
+   candidate ladder and `n` from a weighted linear least squares. Weights make
+   the objective *relative* error in `rho`/`p`. A minimum-separation rule
+   (`MIN_EXPONENT_GAP`/`MIN_EXPONENT_RATIO`) refuses two nearly-equal
+   exponents: they span nearly the same function, so least squares can only
+   distinguish them with huge opposite-signed coefficients — accurate on paper,
+   but evaluated as the difference of two ~1e3 terms whose sum is ~1. An
+   earlier unspaced ladder produced exactly that (coefficients to 2606 for
+   methane's `rhoL`).
+3. **Gate.** The worst relative deviation per fluid is printed and embedded in
+   each row's `max_rel_dev`. `MAX_ACCEPTABLE_DEV = 0.005` **aborts** the script
+   rather than shipping a bad fit; the `[GERG]` test independently rejects any
+   row claiming worse than 1%.
+
+### Running it
+
+```bash
+# reuse the existing venv from generate_reference_values.py (teqp 0.23.2)
+/tmp/gergenv/bin/python dev/gerg/fit_ancillaries.py --report      # deviations per fluid
+/tmp/gergenv/bin/python dev/gerg/fit_ancillaries.py \
+    > src/Backends/GERG/GERGAncillaries.h
+uvx clang-format@18.1.8 -i src/Backends/GERG/GERGAncillaries.h
+```
+
+`--report` also prints the reducing-versus-true-critical columns tabulated
+above. Worst deviation across all 23 pure EOS as shipped: **3.822e-3**
+(`rhoL`, n-hexane); worst `rhoV` 2.730e-3 (n-heptane), worst `pV` 1.180e-3
+(n-decane).
+
+### Saturation end states, and what `triple_liquid` means here
+
+Each row also carries the saturation state at the low-temperature end of the
+fitted range, traced rather than guessed. `make_gerg_fluid` writes it into
+`EOS.sat_min_liquid`/`EOS.sat_min_vapor` — what `calc_Tmin_sat`/`calc_pmin_sat`
+return, and hence what bounds `QT_flash` from below — and into
+`CoolPropFluid::triple_liquid`/`triple_vapor`.
+
+**`triple_*` is CoolProp's field name, not a claim about GERG.** GERG publishes
+no triple point and `EOS.Ttriple` stays 0. `saturation_T_pure_Maxwell`
+(`VLERoutines.cpp:965-980`) reads those two slots purely as "the
+low-temperature end of the saturation curve", to sanity-band the ancillary seed
+and to build a linear fallback seed. Left at `SimpleState`'s `_HUGE` default,
+every seed would fail that band and every pure-fluid saturation call would take
+the fallback path.
+
+### Two consequences worth knowing about
+
+- **Helium and hydrogen have no reachable saturation states.** `make_gerg_fluid`
+  clamps `EOS.limits.Tmin` to `min(60 K, Tc)`, and for those two that *is* `Tc`
+  (5.1953 K and 33.19 K), so the whole subcritical region is outside the
+  backend's range. Ancillaries are still fitted and shipped for them — the
+  table is complete, and `DONT_CHECK_PROPERTY_LIMITS` reaches them — but the
+  `[GERG]` saturation sweep skips them, and asserts that it skips exactly 4
+  fluid/model combinations so the skip cannot quietly widen.
+- **The authoritative range is the mixture-model range.** GERG-2008's published
+  envelope, 60-700 K and p <= 70 MPa (Kunz & Wagner 2012 §4.1), is stated for
+  the mixture model as a whole. GERG publishes no per-component lower
+  temperature limit, and this backend deliberately does not consult CoolProp's
+  triple-point data. A pure-component `Tmin` below 60 K (helium's 5.1953 K) is
+  the removal of a self-contradiction — `Tmin` above `Tc` — not a validity
+  statement, and neither is an ancillary `Tmin` below 60 K (methane's is
+  57.17 K).

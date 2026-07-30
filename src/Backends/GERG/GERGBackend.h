@@ -300,6 +300,18 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
     /// that were not built by make_gerg_fluid.
     GERGMixtureBackend(GERGModel model, const std::vector<CoolPropFluid>& fluids, bool generate_SatL_and_SatV);
 
+    /// make_gerg_fluid needs this constructor for one specific job: filling in
+    /// EOS.hs_anchor.hmolar/smolar and EOS.reduce.hmolar/smolar, which can only
+    /// be obtained by EVALUATING the fluid it has just assembled (via
+    /// update_states()).  The friendship is narrow on purpose -- it grants
+    /// make_gerg_fluid, and nothing else, the ability to build a backend from
+    /// raw fluids, and make_gerg_fluid is the one function whose whole job is
+    /// producing those fluids in the first place.  Widening the constructor to
+    /// public instead would let any caller hand in arbitrary CoolPropFluid
+    /// objects -- e.g. CoolProp's own reference-EOS fluids -- and get them
+    /// treated as GERG components with GERG's gas constant.
+    friend CoolPropFluid GERG::make_gerg_fluid(GERGModel model, const std::string& gerg_name);
+
     GERGModel m_model;
 };
 

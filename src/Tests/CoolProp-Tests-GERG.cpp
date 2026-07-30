@@ -1276,4 +1276,501 @@ TEST_CASE("GERG closes change_EOS and update_with_guesses; downcast-only bypasse
     // every public route" above.
 }
 
+// ###########################################################################
+// Task 11: saturation ancillaries and VLE
+// ###########################################################################
+
+namespace {
+
+/// The saturation curve of a GERG pure fluid is only reachable where BOTH
+/// limits agree it is: at or above the backend's Tmin (make_gerg_fluid's
+/// min(60 K, Tc) -- so helium and hydrogen, whose reducing temperatures are
+/// 5.20 K and 33.19 K, have NO reachable saturation states at all, since
+/// Tmin == Tc for them) and at or above the low-temperature end of the fitted
+/// ancillary range (EOS.sat_min_liquid.T, which for the heavy alkanes is far
+/// above 60 K because the saturation pressure there underflows). Returning
+/// false is a legitimate skip, not a silently weakened test: the count of
+/// fluids that DID run is asserted below so this helper cannot quietly
+/// disable the whole sweep.
+bool saturation_reachable(CoolProp::AbstractState& AS, double T) {
+    CoolPropDbl Tmin_satL = NAN, Tmin_satV = NAN;
+    auto* heos = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(&AS);
+    heos->calc_Tmin_sat(Tmin_satL, Tmin_satV);
+    const double T_lo = std::max(std::max(static_cast<double>(Tmin_satL), static_cast<double>(Tmin_satV)), AS.Tmin());
+    return T > T_lo && T < AS.T_critical();
+}
+
+/// Rebuild one of a fluid's three ancillaries with its output scaled by
+/// (1 + rel), leaving everything else alone.
+///
+/// Scaling `reducing_value` is a uniform relative shift of the ancillary's
+/// OUTPUT at every temperature -- for the two exponential forms
+/// (reducing_value*exp(...)) and the non-exponential one
+/// (reducing_value*(1 + sum)) alike -- which is exactly the "wrong by x%
+/// everywhere" perturbation a refit-gone-bad would produce, and much cleaner
+/// than nudging one n_i (whose effect varies wildly with T).
+CoolProp::SaturationAncillaryFunction perturbed_ancillary(const CoolProp::GERG::AncillaryCoeffs& anc, double rel) {
+    CoolProp::SaturationAncillaryFunction::Values v;
+    v.type = (anc.type == "rhoLnoexp") ? CoolProp::SaturationAncillaryFunction::TYPE_NOT_EXPONENTIAL
+                                       : CoolProp::SaturationAncillaryFunction::TYPE_EXPONENTIAL;
+    v.using_tau_r = (anc.type != "rhoLnoexp");
+    v.n = anc.n;
+    v.t = anc.t;
+    v.Tmin = anc.Tmin;
+    v.Tmax = anc.Tmax;
+    v.reducing_value = anc.reducing_value * (1.0 + rel);
+    v.T_r = anc.T_r;
+    return CoolProp::SaturationAncillaryFunction(v);
+}
+
+}  // namespace
+
+TEST_CASE("GERG ancillary accessors reject bad arguments", "[GERG]") {
+    CHECK_THROWS_AS(get_ancillary(GERGModel::GERG_2008, "methane", "rhoM"), CoolProp::ValueError);
+    CHECK_THROWS_AS(get_ancillary(GERGModel::GERG_2004, "n-decane", "rhoL"), CoolProp::ValueError);
+    CHECK_THROWS_AS(get_sat_min_state(GERGModel::GERG_2004, "hydrogensulfide"), CoolProp::ValueError);
+    CHECK_NOTHROW(get_ancillary(GERGModel::GERG_2008, "n-decane", "rhoL"));
+
+    // The accessor, not the table, owns `type`, so the two can never disagree.
+    CHECK(get_ancillary(GERGModel::GERG_2008, "methane", "rhoL").type == "rhoLnoexp");
+    CHECK(get_ancillary(GERGModel::GERG_2008, "methane", "rhoV").type == "rhoV");
+    CHECK(get_ancillary(GERGModel::GERG_2008, "methane", "pV").type == "pV");
+
+    // Every component of both models has all three ancillaries and a
+    // low-temperature end state -- no fluid may be silently missing one.
+    for (auto model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        for (const auto& name : component_names(model)) {
+            CAPTURE(name);
+            for (const auto* which : {"rhoL", "rhoV", "pV"}) {
+                CAPTURE(which);
+                AncillaryCoeffs anc;
+                REQUIRE_NOTHROW(anc = get_ancillary(model, name, which));
+                CHECK(anc.n.size() == anc.t.size());
+                CHECK(anc.n.size() >= 4);
+                CHECK(anc.reducing_value > 0);
+                CHECK(anc.T_r > 0);
+                CHECK(anc.Tmin > 0);
+                CHECK(anc.Tmin < anc.T_r);
+                // The ship gate from the task brief: 1% relative. The fitter
+                // aborts at 0.5%, so this is the belt to its braces -- a
+                // hand-edited table row cannot slip past both.
+                CHECK(anc.max_rel_dev < 0.01);
+            }
+            CHECK(get_sat_min_state(model, name).p_Pa > 0);
+        }
+    }
+}
+
+TEST_CASE("GERG-2004 and GERG-2008 carry separately fitted ancillaries where the EOS differs", "[GERG]") {
+    // GERG-2008 moved carbon monoxide's and isopentane's reducing parameters
+    // (GERGData.h pure_info_2008_overrides), which moves the whole saturation
+    // curve, so each model needs its own fit. A single shared table would be
+    // numerically plausible and wrong; these checks are what would fail.
+    for (const auto& name : {"carbonmonoxide", "isopentane"}) {
+        CAPTURE(name);
+        const AncillaryCoeffs a4 = get_ancillary(GERGModel::GERG_2004, name, "rhoL");
+        const AncillaryCoeffs a8 = get_ancillary(GERGModel::GERG_2008, name, "rhoL");
+        CHECK(a4.T_r != a8.T_r);
+        CHECK(a4.n != a8.n);
+        // ...and the reducing density each fit is written against must be the
+        // one its own model tabulates.
+        CHECK_THAT(a4.reducing_value, Catch::Matchers::WithinRel(get_pure_info(GERGModel::GERG_2004, name).rhoc_molm3, 1e-14));
+        CHECK_THAT(a8.reducing_value, Catch::Matchers::WithinRel(get_pure_info(GERGModel::GERG_2008, name).rhoc_molm3, 1e-14));
+    }
+
+    // Every other component is shared, and must be byte-identical between the
+    // two models -- a diverging row would mean the 2008 override table had
+    // grown an entry that does not belong to it.
+    for (const auto& name : component_names(GERGModel::GERG_2004)) {
+        if (name == "carbonmonoxide" || name == "isopentane") continue;
+        CAPTURE(name);
+        CHECK(get_ancillary(GERGModel::GERG_2004, name, "pV").n == get_ancillary(GERGModel::GERG_2008, name, "pV").n);
+    }
+}
+
+TEST_CASE("GERG fluids evaluate their ancillaries through CoolProp's own evaluator", "[GERG]") {
+    // make_gerg_fluid builds a CoolProp SaturationAncillaryFunction from each
+    // table row; GERG::evaluate_ancillary is a standalone mirror of
+    // SaturationAncillaryFunction::evaluate used by the tests. If those two
+    // drift apart, every ancillary-accuracy assertion below silently stops
+    // describing the function the flash routines actually call. Pin them
+    // together, on the fluid the backend really built.
+    for (const auto& name : component_names(GERGModel::GERG_2008)) {
+        CAPTURE(name);
+        std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        auto* heos = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(AS.get());
+        REQUIRE(heos != nullptr);
+        CoolProp::CoolPropFluid& fluid = heos->get_components()[0];
+
+        const AncillaryCoeffs aL = get_ancillary(GERGModel::GERG_2008, name, "rhoL");
+        const AncillaryCoeffs aV = get_ancillary(GERGModel::GERG_2008, name, "rhoV");
+        const AncillaryCoeffs ap = get_ancillary(GERGModel::GERG_2008, name, "pV");
+        for (double frac : {0.4, 0.6, 0.8, 0.95}) {
+            const double T = aL.Tmin + frac * (aL.T_r - aL.Tmin);
+            CAPTURE(T);
+            CHECK_THAT(fluid.ancillaries.rhoL.evaluate(T), Catch::Matchers::WithinRel(evaluate_ancillary(aL, T), 1e-14));
+            CHECK_THAT(fluid.ancillaries.rhoV.evaluate(T), Catch::Matchers::WithinRel(evaluate_ancillary(aV, T), 1e-14));
+            CHECK_THAT(fluid.ancillaries.pV.evaluate(T), Catch::Matchers::WithinRel(evaluate_ancillary(ap, T), 1e-14));
+            // pL and pV are the same curve: GERG has no pseudo-pure components.
+            CHECK_THAT(fluid.ancillaries.pL.evaluate(T), Catch::Matchers::WithinRel(evaluate_ancillary(ap, T), 1e-14));
+        }
+        // Above T_r the evaluator must return NaN rather than
+        // pow(negative, fractional) (GitHub #1611).
+        CHECK(std::isnan(evaluate_ancillary(aL, aL.T_r * 1.001)));
+    }
+}
+
+TEST_CASE("GERG carries no superancillary but does carry the saturation end states", "[GERG]") {
+    // The two halves belong together: attaching ancillaries must NOT have
+    // brought a superancillary along, because FlashRoutines::sat_superanc_path_applies
+    // (FlashRoutines.cpp:558) returns the superancillary AS THE ANSWER, so a
+    // GERG fluid carrying CoolProp's blob would report Setzmann-Wagner
+    // saturation densities labelled GERG-2008.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    auto* heos = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(AS.get());
+    REQUIRE(heos != nullptr);
+    CHECK(heos->get_superanc() == nullptr);
+
+    const SatEndState end = get_sat_min_state(GERGModel::GERG_2008, "methane");
+    CoolPropDbl Tmin_satL = NAN, Tmin_satV = NAN, pmin_satL = NAN, pmin_satV = NAN;
+    heos->calc_Tmin_sat(Tmin_satL, Tmin_satV);
+    heos->calc_pmin_sat(pmin_satL, pmin_satV);
+    CHECK_THAT(static_cast<double>(Tmin_satL), Catch::Matchers::WithinRel(end.T_K, 1e-14));
+    CHECK_THAT(static_cast<double>(Tmin_satV), Catch::Matchers::WithinRel(end.T_K, 1e-14));
+    CHECK_THAT(static_cast<double>(pmin_satL), Catch::Matchers::WithinRel(end.p_Pa, 1e-14));
+    CHECK_THAT(static_cast<double>(pmin_satV), Catch::Matchers::WithinRel(end.p_Pa, 1e-14));
+
+    // triple_liquid/triple_vapor get the same state. GERG publishes no triple
+    // point (EOS.Ttriple stays 0); these two slots are read by
+    // saturation_T_pure_Maxwell purely as the low-T end of the saturation
+    // curve. Left at SimpleState's _HUGE default, every ancillary seed would
+    // fail Maxwell's sanity band and every saturation call would take the
+    // linear fallback -- which is why this is asserted rather than assumed.
+    CHECK_THAT(AS->get_state("triple_liquid").rhomolar, Catch::Matchers::WithinRel(end.rhoL_molm3, 1e-14));
+    CHECK_THAT(AS->get_state("triple_vapor").rhomolar, Catch::Matchers::WithinRel(end.rhoV_molm3, 1e-14));
+    CHECK(ValidNumber(AS->get_state("triple_liquid").hmolar));
+
+    // hs_anchor is CoolProp's (1.1*Tc, 0.9*rhoc), with h and s filled in by
+    // update_states() at construction -- both _HUGE without it.
+    const CoolProp::SimpleState& anchor = AS->get_state("hs_anchor");
+    CHECK_THAT(anchor.T, Catch::Matchers::WithinRel(1.1 * AS->T_critical(), 1e-14));
+    CHECK_THAT(anchor.rhomolar, Catch::Matchers::WithinRel(0.9 * AS->rhomolar_critical(), 1e-14));
+    CHECK(ValidNumber(anchor.hmolar));
+    CHECK(ValidNumber(anchor.smolar));
+    CHECK(ValidNumber(AS->get_state("reducing").smolar));
+}
+
+TEST_CASE("GERG hs_anchor stays inside the backend's own temperature range", "[GERG]") {
+    // Water is the fluid this guards: 1.1*647.096 K = 711.8 K is above the
+    // 700 K Tmax that check_gerg_range_of_validity enforces, so an unclamped
+    // anchor makes update_states() throw OutOfRangeError DURING CONSTRUCTION
+    // and the fluid cannot be built at all.
+    std::shared_ptr<AbstractState> AS;
+    REQUIRE_NOTHROW(AS.reset(AbstractState::factory("GERG2008", std::vector<std::string>{"Water"})));
+    const CoolProp::SimpleState& anchor = AS->get_state("hs_anchor");
+    CHECK(anchor.T <= AS->Tmax());
+    CHECK_THAT(anchor.T, Catch::Matchers::WithinRel(700.0, 1e-14));
+    CHECK(ValidNumber(anchor.hmolar));
+}
+
+TEST_CASE("GERG pure fluid saturation converges", "[GERG]") {
+    // The ancillaries seed the iteration; the converged answer is pure GERG.
+    // The consistency check is what distinguishes the two: evaluating the EOS
+    // independently at (T, rhoL) must reproduce the saturation pressure the
+    // flash returned. An implementation that handed the ancillary back as the
+    // answer would miss by the fit's own deviation, ~1e-3 relative, which is
+    // five orders of magnitude outside the tolerance below.
+    for (const auto& name : {"Methane", "Ethane", "Propane", "Nitrogen", "CarbonDioxide"}) {
+        CAPTURE(name);
+        std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        const double T = 0.8 * AS->T_critical();
+        REQUIRE(saturation_reachable(*AS, T));
+        REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
+        const double p_sat = AS->p();
+        const double rhoL = AS->rhomolar();
+        CHECK(rhoL > AS->rhomolar_critical());
+
+        std::shared_ptr<AbstractState> chk(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        chk->specify_phase(iphase_liquid);
+        chk->update(DmolarT_INPUTS, rhoL, T);
+        CHECK_THAT(chk->p(), Catch::Matchers::WithinRel(p_sat, 1e-8));
+
+        // Q = 1 must land on the same pressure from the other side of the dome.
+        std::shared_ptr<AbstractState> vap(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        vap->update(QT_INPUTS, 1.0, T);
+        CHECK_THAT(vap->p(), Catch::Matchers::WithinRel(p_sat, 1e-8));
+        CHECK(vap->rhomolar() < AS->rhomolar_critical());
+        std::shared_ptr<AbstractState> chkv(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        chkv->specify_phase(iphase_gas);
+        chkv->update(DmolarT_INPUTS, vap->rhomolar(), T);
+        CHECK_THAT(chkv->p(), Catch::Matchers::WithinRel(p_sat, 1e-8));
+    }
+}
+
+TEST_CASE("GERG saturation converges for every component whose dome is in range", "[GERG]") {
+    // Sweeps both models. Helium and hydrogen are expected to be skipped
+    // entirely: make_gerg_fluid clamps Tmin to min(60 K, Tc), which for those
+    // two IS Tc, so they have no reachable subcritical state at all. The
+    // ran/skipped counts are asserted so that a future change which quietly
+    // makes MOST fluids unreachable fails here instead of passing vacuously.
+    int ran = 0, skipped = 0;
+    for (auto model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        const std::string backend = (model == GERGModel::GERG_2004) ? "GERG2004" : "GERG2008";
+        for (const auto& name : component_names(model)) {
+            CAPTURE(backend);
+            CAPTURE(name);
+            std::shared_ptr<AbstractState> AS(AbstractState::factory(backend, std::vector<std::string>{name}));
+            const double T = 0.8 * AS->T_critical();
+            if (!saturation_reachable(*AS, T)) {
+                ++skipped;
+                continue;
+            }
+            ++ran;
+            REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
+            const double p_sat = AS->p(), rhoL = AS->rhomolar();
+            CHECK(p_sat > 0);
+            CHECK(rhoL > AS->rhomolar_critical());
+
+            std::shared_ptr<AbstractState> chk(AbstractState::factory(backend, std::vector<std::string>{name}));
+            chk->specify_phase(iphase_liquid);
+            chk->update(DmolarT_INPUTS, rhoL, T);
+            CHECK_THAT(chk->p(), Catch::Matchers::WithinRel(p_sat, 1e-7));
+        }
+    }
+    CHECK(ran == 35);     // 16 of 18 GERG-2004 + 19 of 21 GERG-2008 components
+    CHECK(skipped == 4);  // helium and hydrogen, in both models
+}
+
+TEST_CASE("GERG ancillaries are close to the converged saturation state", "[GERG]") {
+    // The ancillary is only a guess, but a bad guess means slow or failed
+    // convergence -- and this is also the test that fails if the generated
+    // coefficient table is edited (the Task 11 mutation experiment). The
+    // tolerance is each fit's OWN recorded max_rel_dev with headroom, not a
+    // blanket number, so a fluid whose fit degrades cannot hide behind a
+    // loose global bound.
+    int checks = 0;
+    for (auto model : {GERGModel::GERG_2004, GERGModel::GERG_2008}) {
+        const std::string backend = (model == GERGModel::GERG_2004) ? "GERG2004" : "GERG2008";
+        for (const auto& name : component_names(model)) {
+            CAPTURE(backend);
+            CAPTURE(name);
+            std::shared_ptr<AbstractState> AS(AbstractState::factory(backend, std::vector<std::string>{name}));
+            const AncillaryCoeffs aL = get_ancillary(model, name, "rhoL");
+            const AncillaryCoeffs aV = get_ancillary(model, name, "rhoV");
+            const AncillaryCoeffs ap = get_ancillary(model, name, "pV");
+            const double tol_L = 2.0 * aL.max_rel_dev;
+            const double tol_V = 2.0 * aV.max_rel_dev;
+            const double tol_p = 2.0 * ap.max_rel_dev;
+            for (double frac : {0.35, 0.5, 0.65, 0.8, 0.95}) {
+                const double T = aL.Tmin + frac * (AS->T_critical() - aL.Tmin);
+                if (!saturation_reachable(*AS, T)) continue;
+                CAPTURE(T);
+                REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
+                const double rhoL = AS->rhomolar(), p_sat = AS->p();
+                AS->update(QT_INPUTS, 1.0, T);
+                const double rhoV = AS->rhomolar();
+                CHECK_THAT(evaluate_ancillary(aL, T), Catch::Matchers::WithinRel(rhoL, tol_L));
+                CHECK_THAT(evaluate_ancillary(aV, T), Catch::Matchers::WithinRel(rhoV, tol_V));
+                CHECK_THAT(evaluate_ancillary(ap, T), Catch::Matchers::WithinRel(p_sat, tol_p));
+                ++checks;
+            }
+        }
+    }
+    // Pins the sweep's own coverage: if `saturation_reachable` starts skipping
+    // everything, this fails rather than the suite passing with zero work.
+    CHECK(checks >= 150);
+}
+
+TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]") {
+    // sat_min_liquid/sat_min_vapor were traced with teqp, not guessed. Solving
+    // GERG's own VLE at that temperature must reproduce them -- which checks
+    // the traced values, the ancillary fit at the very bottom of its range
+    // (its worst-conditioned end), and the units of the stored p all at once.
+    for (const auto& name : {"Methane", "Nitrogen", "Ethane", "n-Butane", "Water", "Argon"}) {
+        CAPTURE(name);
+        std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        const SatEndState end = get_sat_min_state(GERGModel::GERG_2008, resolve_component(GERGModel::GERG_2008, name));
+        // A hair above the stored T: calc_Tmin_sat is an inclusive lower bound
+        // and QT_flash subtracts only 1e-13 from it.
+        const double T = end.T_K * (1 + 1e-9);
+        if (!saturation_reachable(*AS, T)) continue;
+        REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
+        CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoL_molm3, 1e-6));
+        // 1e-5 on p, not 1e-6: at the bottom of the fitted range the
+        // saturation pressure is sub-Pascal for the heavier alkanes
+        // (n-butane's end state is 0.1515 Pa), and Maxwell's convergence
+        // criterion is on the density residual, so p carries a bit more
+        // slack than rhoL/rhoV do. Still three orders tighter than the
+        // ancillary's own accuracy, so it cannot be satisfied by a seed.
+        CHECK_THAT(AS->p(), Catch::Matchers::WithinRel(end.p_Pa, 1e-5));
+        AS->update(QT_INPUTS, 1.0, T);
+        CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoV_molm3, 1e-6));
+    }
+}
+
+TEST_CASE("GERG saturation is independent of the ancillary seed", "[GERG]") {
+    // THE PROPERTY THAT PROVES ANCILLARIES ARE SEEDS AND NOT ANSWERS.
+    //
+    // Perturb all three ancillaries by 1% -- roughly three times the worst
+    // fit deviation in the shipped table, i.e. comfortably outside the band
+    // the fit claims -- and the converged saturation state must not move at
+    // all beyond solver tolerance. If it moves by anything resembling the
+    // perturbation, the flash is returning the seed (or stopping one step
+    // short of convergence), and every ancillary-accuracy assertion above is
+    // really measuring the ancillary rather than GERG.
+    for (const auto& name : {"Methane", "Propane", "CarbonDioxide", "n-Octane"}) {
+        CAPTURE(name);
+        const std::string gerg = resolve_component(GERGModel::GERG_2008, name);
+
+        std::shared_ptr<AbstractState> ref(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+        const double T = 0.75 * ref->T_critical();
+        REQUIRE(saturation_reachable(*ref, T));
+        ref->update(QT_INPUTS, 0.0, T);
+        const double p0 = ref->p(), rhoL0 = ref->rhomolar();
+        ref->update(QT_INPUTS, 1.0, T);
+        const double rhoV0 = ref->rhomolar();
+
+        for (double rel : {-0.01, +0.01}) {
+            CAPTURE(rel);
+            std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
+            auto* heos = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(AS.get());
+            REQUIRE(heos != nullptr);
+            CoolProp::CoolPropFluid& fluid = heos->get_components()[0];
+            fluid.ancillaries.rhoL = perturbed_ancillary(get_ancillary(GERGModel::GERG_2008, gerg, "rhoL"), rel);
+            fluid.ancillaries.rhoV = perturbed_ancillary(get_ancillary(GERGModel::GERG_2008, gerg, "rhoV"), rel);
+            fluid.ancillaries.pV = perturbed_ancillary(get_ancillary(GERGModel::GERG_2008, gerg, "pV"), rel);
+            fluid.ancillaries.pL = fluid.ancillaries.pV;
+            // Confirm the perturbation actually took effect -- otherwise this
+            // test would pass by doing nothing at all.
+            REQUIRE_THAT(fluid.ancillaries.rhoL.evaluate(T),
+                         Catch::Matchers::WithinRel(evaluate_ancillary(get_ancillary(GERGModel::GERG_2008, gerg, "rhoL"), T) * (1 + rel), 1e-12));
+
+            AS->update(QT_INPUTS, 0.0, T);
+            CHECK_THAT(AS->p(), Catch::Matchers::WithinRel(p0, 1e-9));
+            CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(rhoL0, 1e-9));
+            AS->update(QT_INPUTS, 1.0, T);
+            CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(rhoV0, 1e-9));
+        }
+    }
+}
+
+TEST_CASE("GERG saturation keeps GERG-typed linked states", "[GERG]") {
+    // saturation_T_pure_Maxwell does all its work through HEOS.SatL/SatV. If
+    // either were base-typed, calc_gas_constant would return CODATA R
+    // (8.31446261815324) instead of R_GERG (8.314472) -- a 1.1e-6 relative
+    // error that would land in every saturation pressure with nothing to
+    // indicate it.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    auto* gerg = dynamic_cast<GERGMixtureBackend*>(AS.get());
+    REQUIRE(gerg != nullptr);
+    AS->update(QT_INPUTS, 0.0, 0.8 * AS->T_critical());
+    for (auto* sat : {&gerg->get_SatL(), &gerg->get_SatV()}) {
+        CHECK(sat->backend_name() == "GERG2008Backend");
+        CHECK_THAT(sat->gas_constant(), Catch::Matchers::WithinRel(8.314472, 1e-15));
+        CHECK(dynamic_cast<GERGMixtureBackend*>(sat) != nullptr);
+    }
+    // Not CODATA: the whole point of the check above.
+    CHECK(std::abs(8.314472 - CoolProp::get_config_double(R_U_CODATA)) > 1e-6);
+}
+
+TEST_CASE("GERG handles a full 21-component list with mostly-zero mole fractions", "[GERG]") {
+    // THE BACKEND'S HEADLINE USE CASE, and until now the one thing it could
+    // not do. A natural-gas analysis is normally handed over as the full
+    // GERG-2008 component list with a mole fraction for each, most of them
+    // exactly zero. Every such composition used to return a silent NaN --
+    // GERG2008ReducingFunction::f_Y_ij is x_i*x_j*(x_i+x_j)/(beta^2 x_i + x_j),
+    // which is 0/0 as soon as TWO mole fractions are exactly zero -- so
+    // T_reducing, rhomolar_reducing and hence every property came back NaN
+    // with no error raised. Pre-existing for every multi-fluid backend
+    // (GitHub #1677 / bd CoolProp-8psx); Task 9 routed around it by trimming
+    // compositions to their nonzero components, which left this case untested.
+    //
+    // The fix is the removable-singularity guard in ReducingFunctions.cpp. The
+    // assertion that matters is not merely "finite" but "identical to the
+    // trimmed composition": a guard returning some other constant would still
+    // be finite and still be wrong.
+    const std::vector<std::string>& all = component_names(GERGModel::GERG_2008);
+    REQUIRE(all.size() == 21);
+
+    // A realistic pipeline-gas analysis over the full component list: 8
+    // nonzero, 13 exactly zero. The zeros are what this test is about.
+    std::map<std::string, double> analysis = {{"methane", 0.90644}, {"nitrogen", 0.03134},  {"carbondioxide", 0.00466}, {"ethane", 0.04528},
+                                              {"propane", 0.00828}, {"isobutane", 0.00156}, {"n-butane", 0.00104},      {"isopentane", 0.00140}};
+    std::vector<CoolPropDbl> z_full;
+    std::vector<std::string> names_trim;
+    std::vector<CoolPropDbl> z_trim;
+    double total = 0;
+    for (const auto& name : all) {
+        auto it = analysis.find(name);
+        const double zi = (it == analysis.end()) ? 0.0 : it->second;
+        z_full.push_back(zi);
+        total += zi;
+        if (zi != 0.0) {
+            names_trim.push_back(name);
+            z_trim.push_back(zi);
+        }
+    }
+    REQUIRE_THAT(total, Catch::Matchers::WithinRel(1.0, 1e-12));
+    REQUIRE(names_trim.size() == 8);
+    // 13 exactly-zero entries -> C(13,2) = 78 both-zero pairs reach f_Y_ij.
+    REQUIRE(z_full.size() - names_trim.size() == 13);
+
+    std::shared_ptr<AbstractState> full(AbstractState::factory("GERG2008", all));
+    full->set_mole_fractions(z_full);
+    std::shared_ptr<AbstractState> trim(AbstractState::factory("GERG2008", names_trim));
+    trim->set_mole_fractions(z_trim);
+
+    // The reducing state is where the NaN was born.
+    CHECK(ValidNumber(full->T_reducing()));
+    CHECK(ValidNumber(full->rhomolar_reducing()));
+    CHECK_THAT(full->T_reducing(), Catch::Matchers::WithinRel(trim->T_reducing(), 1e-14));
+    CHECK_THAT(full->rhomolar_reducing(), Catch::Matchers::WithinRel(trim->rhomolar_reducing(), 1e-14));
+
+    // ...and every property follows. Note alphar is NOT trivially equal:
+    // the residual sum runs over all 21 components and all 210 pairs in the
+    // full case versus 8 and 28 in the trimmed one, so agreeing to 1e-14 is a
+    // real statement that the zero-mole-fraction terms contribute exactly zero.
+    for (auto* AS : {full.get(), trim.get()}) {
+        AS->specify_phase(iphase_gas);
+        AS->update(DmolarT_INPUTS, 4000.0, 300.0);
+    }
+    CHECK(ValidNumber(full->p()));
+    CHECK_THAT(full->alphar(), Catch::Matchers::WithinRel(trim->alphar(), 1e-14));
+    CHECK_THAT(full->alpha0(), Catch::Matchers::WithinRel(trim->alpha0(), 1e-14));
+    CHECK_THAT(full->p(), Catch::Matchers::WithinRel(trim->p(), 1e-13));
+    CHECK_THAT(full->molar_mass(), Catch::Matchers::WithinRel(trim->molar_mass(), 1e-14));
+    CHECK_THAT(full->cvmolar(), Catch::Matchers::WithinRel(trim->cvmolar(), 1e-12));
+
+    // A single zero mole fraction was never affected (f_Y_ij's denominator is
+    // nonzero then), and must stay exact -- the guard fires on the both-zero
+    // corner only, so infinite-dilution behaviour is untouched.
+    std::shared_ptr<AbstractState> one_zero(AbstractState::factory("GERG2008", std::vector<std::string>{"methane", "ethane"}));
+    one_zero->set_mole_fractions(std::vector<CoolPropDbl>{1.0, 0.0});
+    std::shared_ptr<AbstractState> pure(AbstractState::factory("GERG2008", std::vector<std::string>{"methane"}));
+    for (auto* AS : {one_zero.get(), pure.get()}) {
+        AS->specify_phase(iphase_gas);
+        AS->update(DmolarT_INPUTS, 4000.0, 300.0);
+    }
+    CHECK_THAT(one_zero->p(), Catch::Matchers::WithinRel(pure->p(), 1e-13));
+}
+
+TEST_CASE("GERG saturation round-trips through pressure and quality inputs", "[GERG]") {
+    // PQ_flash and DQ_flash reach the saturation solver by different routes
+    // than QT_flash (via the pV ancillary's invert() and a Brent sweep
+    // respectively), so both are exercised.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    const double T = 0.8 * AS->T_critical();
+    AS->update(QT_INPUTS, 0.0, T);
+    const double p_sat = AS->p(), rhoL = AS->rhomolar();
+
+    std::shared_ptr<AbstractState> pq(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    REQUIRE_NOTHROW(pq->update(PQ_INPUTS, p_sat, 0.0));
+    CHECK_THAT(pq->T(), Catch::Matchers::WithinRel(T, 1e-8));
+    CHECK_THAT(pq->rhomolar(), Catch::Matchers::WithinRel(rhoL, 1e-7));
+
+    std::shared_ptr<AbstractState> dq(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    REQUIRE_NOTHROW(dq->update(DmolarQ_INPUTS, rhoL, 0.0));
+    CHECK_THAT(dq->T(), Catch::Matchers::WithinRel(T, 1e-6));
+}
+
 #endif /* ENABLE_CATCH */

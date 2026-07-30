@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 #include <utility>
 
 #include <memory>
@@ -9,6 +10,8 @@
 #include "CoolProp/CoolProp.h"
 #include "CoolProp/Configuration.h"
 #include "CoolProp/Exceptions.h"
+#include "CoolProp/fluids/Ancillaries.h"
+#include "GERGAncillaries.h"
 #include "GERGData.h"
 #include "Backends/Helmholtz/ExcessHEFunction.h"
 #include "Backends/Helmholtz/ReducingFunctions.h"
@@ -1167,6 +1170,110 @@ std::size_t departure_Npower(const DepartureCoeffs& dc) {
     return np;
 }
 
+namespace {
+
+/// The generated ancillary row for one component, resolved through the same
+/// base-plus-overrides shape get_pure_info uses.  Throws ValueError if the
+/// component is not part of the given model, so a GERG-2004 caller cannot
+/// silently receive a GERG-2008-only fluid's ancillary.
+const detail::AncillarySet& lookup_ancillary_set(GERGModel model, const std::string& gerg_name) {
+    if (model == GERGModel::GERG_2008) {
+        const auto& ov = detail::ancillaries_2008_overrides();
+        auto it = ov.find(gerg_name);
+        if (it != ov.end()) {
+            return it->second;
+        }
+    }
+    // GERG-2004 does not contain the three fluids added in GERG-2008; reject
+    // them here rather than falling through to the 2004 base table, which does
+    // not have them either but would produce a less specific error.
+    const auto& names = component_names(model);
+    if (std::find(names.begin(), names.end(), gerg_name) == names.end()) {
+        throw ValueError(format("[%s] is not a component of this GERG model", gerg_name.c_str()));
+    }
+    const auto& base = detail::ancillaries_2004();
+    auto it = base.find(gerg_name);
+    if (it == base.end()) {
+        throw ValueError(format("Unable to load GERG saturation ancillaries for [%s]", gerg_name.c_str()));
+    }
+    return it->second;
+}
+
+}  // namespace
+
+AncillaryCoeffs get_ancillary(GERGModel model, const std::string& gerg_name, const std::string& which) {
+    const detail::AncillarySet& set = lookup_ancillary_set(model, gerg_name);
+    AncillaryCoeffs anc;
+    if (which == "rhoL") {
+        anc = set.rhoL;
+        // The strings are the ones cpjson::make_saturation_ancillary accepts
+        // (FluidLibraryFactories.h:57-60): "rhoLnoexp" selects
+        // TYPE_NOT_EXPONENTIAL, anything else TYPE_EXPONENTIAL.
+        anc.type = "rhoLnoexp";
+    } else if (which == "rhoV") {
+        anc = set.rhoV;
+        anc.type = "rhoV";
+    } else if (which == "pV") {
+        anc = set.pV;
+        anc.type = "pV";
+    } else {
+        throw ValueError(format("GERG ancillary [%s] is not one of rhoL, rhoV, pV", which.c_str()));
+    }
+    return anc;
+}
+
+SatEndState get_sat_min_state(GERGModel model, const std::string& gerg_name) {
+    return lookup_ancillary_set(model, gerg_name).sat_min;
+}
+
+double evaluate_ancillary(const AncillaryCoeffs& anc, double T) {
+    // Deliberately mirrors SaturationAncillaryFunction::evaluate
+    // (Ancillaries.cpp:43-79) term for term, INCLUDING the quiet NaN for
+    // T > T_r: pow(negative, fractional) is otherwise a NaN-or-SIGFPE
+    // (GitHub #1611), and internal callers rely on the NaN.  If this drifts
+    // from CoolProp's evaluator, the tests that compare a fitted ancillary to
+    // a converged saturation state stop testing the code that actually runs.
+    const double theta = 1.0 - T / anc.T_r;
+    if (theta < 0) {
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    double summer = 0;
+    for (std::size_t i = 0; i < anc.n.size(); ++i) {
+        summer += anc.n[i] * std::pow(theta, anc.t[i]);
+    }
+    if (anc.type == "rhoLnoexp") {
+        return anc.reducing_value * (1 + summer);
+    }
+    // "rhoV" and "pV" both carry the T_r/T factor (using_tau_r = true).
+    return anc.reducing_value * std::exp(anc.T_r / T * summer);
+}
+
+namespace {
+
+/// Build a CoolProp SaturationAncillaryFunction from a GERG-fitted row.
+///
+/// This goes through SaturationAncillaryFunction::Values -- the same
+/// plain-typed bundle cpjson::make_saturation_ancillary fills from JSON
+/// (FluidLibraryFactories.h:41-73) -- so the ancillary that ends up on a GERG
+/// fluid is byte-for-byte the same kind of object every other CoolProp fluid
+/// carries, and SaturationAncillaryFunction::evaluate is the single evaluator.
+/// Reimplementing the evaluation here instead would leave the flash routines
+/// reading one function and the tests another.
+SaturationAncillaryFunction make_anc(const AncillaryCoeffs& anc) {
+    SaturationAncillaryFunction::Values v;
+    v.type = (anc.type == "rhoLnoexp") ? SaturationAncillaryFunction::TYPE_NOT_EXPONENTIAL : SaturationAncillaryFunction::TYPE_EXPONENTIAL;
+    v.using_tau_r = (anc.type != "rhoLnoexp");
+    v.n = anc.n;
+    v.t = anc.t;
+    v.Tmin = anc.Tmin;
+    v.Tmax = anc.Tmax;
+    v.reducing_value = anc.reducing_value;
+    v.T_r = anc.T_r;
+    return SaturationAncillaryFunction(v);
+}
+
+}  // namespace
+
 CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
     const PureInfo info = get_pure_info(model, gerg_name);
     const PureCoeffs pc = get_pure_coeffs(model, gerg_name);
@@ -1398,6 +1505,82 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
         }
     }
 
+    // --- Saturation ancillaries and the saturation-curve end states -----
+    //
+    // The ancillaries are FITTED AGAINST THIS EOS (dev/gerg/fit_ancillaries.py,
+    // table in GERGAncillaries.h), not borrowed from CoolProp's library.
+    // CoolProp's shipped ancillaries for these same fluids belong to each
+    // fluid's REFERENCE equation of state -- Setzmann-Wagner for methane,
+    // IAPWS-95 for water -- and would work perfectly well as seeds, which is
+    // exactly the trap: a backend named GERG-2008 would then carry data
+    // traceable to a different equation with nothing anywhere to say so.
+    //
+    // A SUPERANCILLARY IS A DIFFERENT THING AND MUST NEVER BE ATTACHED.  An
+    // ancillary is a seed that saturation_T_pure_Maxwell iterates away from;
+    // FlashRoutines::sat_superanc_path_applies (FlashRoutines.cpp:558) takes
+    // the Chebyshev superancillary and RETURNS IT as the answer.  Nothing
+    // below calls EquationOfState::set_superancillaries_str, so get_superanc()
+    // stays null and that path is unreachable -- pinned by the task-10 test
+    // "GERG fluids carry no superancillary".
+    {
+        fluid.ancillaries.rhoL = make_anc(get_ancillary(model, gerg_name, "rhoL"));
+        fluid.ancillaries.rhoV = make_anc(get_ancillary(model, gerg_name, "rhoV"));
+        // CoolProp keeps separate saturated-liquid and saturated-vapour
+        // pressure ancillaries so that pseudo-pure fluids can have a glide.
+        // GERG's components are all true pure fluids, so both slots get the
+        // same curve -- the same thing FluidLibrary.h:1136-1137 does when a
+        // fluid's JSON has one "pS" block instead of a "pL"/"pV" pair.
+        const AncillaryCoeffs pV = get_ancillary(model, gerg_name, "pV");
+        fluid.ancillaries.pL = make_anc(pV);
+        fluid.ancillaries.pV = make_anc(pV);
+
+        // The saturation state at the low-temperature end of the fitted range,
+        // traced with teqp rather than guessed.  calc_Tmin_sat/calc_pmin_sat
+        // return these, and QT_flash uses them as its lower bound
+        // (FlashRoutines.cpp:920-934), so a wrong value here shows up as
+        // either a spurious out-of-range throw or a saturation call attempted
+        // where there is no data.
+        const SatEndState end = get_sat_min_state(model, gerg_name);
+        EOS.sat_min_liquid.T = end.T_K;
+        EOS.sat_min_liquid.p = end.p_Pa;
+        EOS.sat_min_liquid.rhomolar = end.rhoL_molm3;
+        EOS.sat_min_vapor.T = end.T_K;
+        EOS.sat_min_vapor.p = end.p_Pa;
+        EOS.sat_min_vapor.rhomolar = end.rhoV_molm3;
+
+        // triple_liquid / triple_vapor get the SAME state, and the name is
+        // CoolProp's, not a claim about GERG.  GERG publishes no triple point
+        // and EOS.Ttriple stays 0 above; saturation_T_pure_Maxwell
+        // (VLERoutines.cpp:965-980) reads these two slots purely as "the
+        // low-temperature end of the saturation curve", to sanity-band the
+        // ancillary seed (rhoL > 1.2*tripleL.rhomolar rejects it) and to build
+        // a linear fallback seed through (tripleL.T, tripleL.rhomolar).  With
+        // both left at the SimpleState default of _HUGE, every seed would fail
+        // that band and every pure-fluid saturation call would take the
+        // fallback path.
+        fluid.triple_liquid.T = end.T_K;
+        fluid.triple_liquid.p = end.p_Pa;
+        fluid.triple_liquid.rhomolar = end.rhoL_molm3;
+        fluid.triple_vapor.T = end.T_K;
+        fluid.triple_vapor.p = end.p_Pa;
+        fluid.triple_vapor.rhomolar = end.rhoV_molm3;
+    }
+
+    // --- hs_anchor ------------------------------------------------------
+    //
+    // CoolProp's convention is (1.1*Tc, 0.9*rhoc) -- a single-phase point just
+    // outside the dome that h/s-input flashes use as a reference offset.
+    //
+    // The min() is water: 1.1*647.096 K = 711.8 K is above this backend's
+    // Tmax of 700 K, and GERGMixtureBackend::update runs
+    // check_gerg_range_of_validity, so update_states() below would throw
+    // OutOfRangeError while building the fluid.  Clamping to Tmax keeps the
+    // anchor inside the range the backend will actually evaluate.  It is only
+    // an offset, so the exact temperature is not load-bearing -- but a fluid
+    // that throws during construction very much is.
+    EOS.hs_anchor.T = std::min(1.1 * EOS.reduce.T, EOS.limits.Tmax);
+    EOS.hs_anchor.rhomolar = 0.9 * EOS.reduce.rhomolar;
+
     // NOTE: EquationOfState::validate() (CoolPropFluid.h:450-453) is two bare
     // assert()s on R_u and molar_mass, so it is compiled out entirely under
     // NDEBUG -- i.e. in the mandated Release build it does nothing.  It is
@@ -1406,6 +1589,57 @@ CoolPropFluid make_gerg_fluid(GERGModel model, const std::string& gerg_name) {
     // the reference `w` column (w = sqrt(-R T/M * ...)) and the
     // "uses the GERG gas constant and reducing state" test.
     EOS.validate();
+
+    // hs_anchor.hmolar/smolar and reduce.hmolar/smolar can only be filled in
+    // by EVALUATING the assembled EOS, which needs a backend.  update_states()
+    // is CoolProp's own routine for that (HelmholtzEOSMixtureBackend.cpp:545);
+    // it is not called anywhere else in the tree because FluidLibrary reads
+    // those four numbers out of the fluid JSON instead, and GERG has no JSON.
+    //
+    // The temporary is GERG-typed, with generate_SatL_and_SatV = false so the
+    // recursion stops: a base HelmholtzEOSMixtureBackend would compute
+    // hs_anchor.hmolar with CODATA R rather than R_GERG for anything but a
+    // pure fluid, and h/s offsets that are wrong in the 7th digit are exactly
+    // the kind of error that never shows up in p or w.  update_states() writes
+    // into ITS OWN copy of the fluid, so the four values are copied back out.
+    {
+        GERGMixtureBackend probe(model, std::vector<CoolPropFluid>(1, fluid), false);
+        probe.set_mole_fractions(std::vector<CoolPropDbl>(1, 1.0));
+        probe.update_states();
+        const EquationOfState& probed = probe.get_components()[0].EOS();
+        EOS.hs_anchor.hmolar = probed.hs_anchor.hmolar;
+        EOS.hs_anchor.smolar = probed.hs_anchor.smolar;
+        EOS.reduce.hmolar = probed.reduce.hmolar;
+        EOS.reduce.smolar = probed.reduce.smolar;
+
+        // update_states() does not touch triple_liquid/triple_vapor (only
+        // set_fluid_enthalpy_entropy_offset does, and that is not on this
+        // path), so their h and s would stay at SimpleState's _HUGE and
+        // get_state("triple_liquid") would report a non-number.  Nothing in
+        // the flash routines reads them -- Maxwell only wants T and rhomolar
+        // -- but a public accessor returning _HUGE is a trap for the next
+        // reader, so they are filled in here.
+        //
+        // update_DmolarT_direct, NOT update: for the light fluids the traced
+        // end of the saturation curve is BELOW make_gerg_fluid's 60 K Tmin
+        // (methane's is 57.17 K), so update() would throw OutOfRangeError from
+        // check_gerg_range_of_validity.  This is the one place the bypass is
+        // unambiguously right: the point being evaluated is one this backend
+        // computed itself and stored, and the alternative is a fluid that
+        // cannot be constructed.
+        for (SimpleState* st : {&fluid.triple_liquid, &fluid.triple_vapor}) {
+            probe.update_DmolarT_direct(st->rhomolar, st->T);
+            st->hmolar = probe.hmolar();
+            st->smolar = probe.smolar();
+        }
+    }
+    // fluid.crit was copied from EOS.reduce before h/s existed, so refresh the
+    // two fields update_states() just filled in.  Leaving crit.hmolar at
+    // _HUGE while reduce.hmolar is finite would make get_state("critical") and
+    // get_state("reducing") disagree about the same point.
+    fluid.crit.hmolar = EOS.reduce.hmolar;
+    fluid.crit.smolar = EOS.reduce.smolar;
+
     return fluid;
 }
 

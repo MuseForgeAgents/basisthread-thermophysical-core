@@ -308,6 +308,89 @@ bool get_Fij(GERGModel model, const std::string& f1, const std::string& f2, doub
 /// interface symmetry.
 DepartureCoeffs get_departurecoeffs(GERGModel model, const std::string& f1, const std::string& f2);
 
+/// One saturation ancillary, in exactly the schema dev/fluids/*.json's
+/// ANCILLARIES block uses, so that make_gerg_fluid can hand it straight to
+/// CoolProp's own SaturationAncillaryFunction and the shipped evaluation path
+/// (Ancillaries.cpp) is reused rather than reimplemented.  `type` names the
+/// functional form with the same strings cpjson::make_saturation_ancillary
+/// accepts (FluidLibraryFactories.h:41-73):
+///
+///   "rhoLnoexp"  (TYPE_NOT_EXPONENTIAL, using_tau_r = false)
+///        y = reducing_value * (1 + sum_i n_i theta^{t_i})
+///   "rhoV", "pV" (TYPE_EXPONENTIAL, using_tau_r = true)
+///        y = reducing_value * exp(T_r/T * sum_i n_i theta^{t_i})
+///
+///   theta = 1 - T/T_r
+///
+/// UNITS: reducing_value carries the units of the output -- mol/m^3 for
+/// "rhoLnoexp"/"rhoV", Pa for "pV".  n and t are dimensionless; T_r, Tmin and
+/// Tmax are in K.
+///
+/// AN ANCILLARY IS A SEED, NOT AN ANSWER.  QT_flash hands these to
+/// SaturationSolvers::saturation_T_pure_Maxwell, which iterates to the true
+/// GERG saturation state; no ancillary value is ever returned to a caller.
+/// That is also why no superancillary may be attached to a GERG fluid:
+/// FlashRoutines::sat_superanc_path_applies (FlashRoutines.cpp:558) routes
+/// pure-fluid saturation straight to the Chebyshev expansion and RETURNS THAT
+/// as the answer, which for a GERG fluid would be a reference-EOS saturation
+/// density labelled GERG-2008.
+///
+/// max_rel_dev is the worst relative deviation of this fit from the traced
+/// teqp VLE curve over [Tmin, T_r], as measured by dev/gerg/fit_ancillaries.py
+/// and carried along so a test can assert against the fit's own claim rather
+/// than a hard-coded number.
+///
+/// A t_i == 0 term appears in every fit deliberately: GERG's Table A3.5
+/// reducing parameters are fitted quantities rather than the true critical
+/// point of the shortened form (they differ by up to +1.10 K and -5.4% in
+/// density), so the usual "the ancillary is exact at the critical point"
+/// property does not hold and the value at T = T_r has to stay free.  See the
+/// module docstring of dev/gerg/fit_ancillaries.py.
+struct AncillaryCoeffs
+{
+    std::vector<double> n, t;
+    double reducing_value, T_r, Tmin, Tmax, max_rel_dev;
+    std::string type;
+};
+
+/// The saturation state at the low-temperature end of the fitted ancillary
+/// range, traced with teqp rather than guessed.  make_gerg_fluid writes it
+/// into EOS.sat_min_liquid / EOS.sat_min_vapor (which is what
+/// HelmholtzEOSMixtureBackend::calc_Tmin_sat and calc_pmin_sat return, and
+/// hence what bounds QT_flash from below) and into
+/// CoolPropFluid::triple_liquid / triple_vapor.
+///
+/// THIS IS NOT A TRIPLE POINT.  GERG publishes none, and EOS.Ttriple stays 0
+/// (see make_gerg_fluid).  CoolProp's `triple_liquid`/`triple_vapor` slots are
+/// read by saturation_T_pure_Maxwell (VLERoutines.cpp:965-980) purely as the
+/// low-temperature end of the saturation curve, to sanity-band the ancillary
+/// seed and to build a linear fallback seed; the lowest temperature at which
+/// this backend has saturation data is exactly the right value for that use.
+struct SatEndState
+{
+    double T_K, p_Pa, rhoL_molm3, rhoV_molm3;
+};
+
+/// Saturation ancillary for one component, fitted against the GERG pure EOS
+/// (dev/gerg/fit_ancillaries.py, table in GERGAncillaries.h).  `which` is
+/// "rhoL", "rhoV" or "pV"; anything else throws ValueError, as does a
+/// gerg_name that is not a component of the given model.  The returned
+/// `type` is filled in from `which` by this accessor -- the generated table
+/// leaves it empty -- so the table cannot disagree with the accessor about
+/// which functional form a row is.
+AncillaryCoeffs get_ancillary(GERGModel model, const std::string& gerg_name, const std::string& which);
+
+/// Evaluate an ancillary at temperature T, returning the same units as
+/// AncillaryCoeffs::reducing_value (Pa for "pV", mol/m^3 for "rhoL"/"rhoV").
+/// Mirrors SaturationAncillaryFunction::evaluate exactly, including its
+/// NaN-for-T-above-T_r behaviour; it exists so a test can evaluate a fit
+/// without building a whole fluid.
+double evaluate_ancillary(const AncillaryCoeffs& anc, double T);
+
+/// Saturation state at the low-temperature end of the fitted range.  Throws
+/// ValueError if gerg_name is not a component of the given model.
+SatEndState get_sat_min_state(GERGModel model, const std::string& gerg_name);
+
 /// Number of leading terms in dc.n (etc.) with eta == 0 and beta == 0 -- the
 /// polynomial block that CoolProp's GERG2008DepartureFunction constructor
 /// (ExcessHEFunction.h:108) expects as a contiguous prefix, with every
