@@ -15,6 +15,7 @@
 #   ./dev/ci/preflight.sh --skip=cppcheck,clang-tidy   # subset
 #   ./dev/ci/preflight.sh --skip=json-symbols          # subset
 #   ./dev/ci/preflight.sh --skip=install-headers        # subset
+#   ./dev/ci/preflight.sh --skip=incomp-sanity          # subset
 #
 # Tools resolved at runtime:
 #   - clang-format     : uvx clang-format@<version-from-.pre-commit-config>
@@ -40,9 +41,15 @@ SKIP_CHECKS=""
 for arg in "$@"; do
     case "$arg" in
         --base=*) BASE_REF="${arg#*=}" ;;
-        --skip=*) SKIP_CHECKS="${arg#*=}" ;;
+        # Append rather than assign: a repeated --skip= used to overwrite the
+        # earlier one, so `--skip=a --skip=b` silently skipped only b and ran a.
+        # Both forms now work -- CSV in one flag, or the flag repeated.
+        --skip=*) SKIP_CHECKS="${SKIP_CHECKS:+$SKIP_CHECKS,}${arg#*=}" ;;
         --help|-h)
-            sed -n '2,30p' "$0"
+            # Print the header comment block, stopping at the first
+            # non-comment line. A hardcoded end line silently truncated this
+            # mid-sentence every time a usage line was added to the header.
+            sed -n '2,${/^#/!q;p;}' "$0"
             exit 0
             ;;
         *)
@@ -221,15 +228,29 @@ elif [ ! -x ./build_catch/CatchTestRunner ]; then
 else
     # Tag scope selection.  Path -> tag mapping mirrors how CI's broad
     # workflow runs the full suite, but skips the expensive `[slow]`
-    # tests by default for fast local feedback.  Pass --slow to include.
-    # ADDITIVE, not first-match-wins.  This used to be an if/elif chain, and
-    # that shape is itself a fail-open: a diff touching two areas selected the
-    # first arm only and ran ZERO tests for the second while reporting a green
-    # gate.  That is not hypothetical — it is exactly how the GERG suite went
-    # unrun (every GERG change also touches src/Backends/Helmholtz/, so the
-    # Helmholtz arm swallowed it), and the same trap catches an SBTL + GERG
-    # diff, an SBTL + Helmholtz diff, and every future pair.  Each area now
-    # contributes its tags independently and they are unioned.
+    # tests by default for fast local feedback.  (There is no --slow flag;
+    # run `./build_catch/CatchTestRunner "[slow]"` directly for those.)
+    # Catch2 filter syntax, since three of these were wrong before:
+    #   ~[tag]   EXCLUDES a tag.  `[!slow]` does NOT exclude -- it selects a
+    #            literal tag named "!slow", which no test carries, so
+    #            `[!slow][!benchmark]` matched 0 test cases and this gate
+    #            passed while running NOTHING.
+    #   ,        inside one spec is OR.
+    #   [!benchmark] is a real Catch2 tag, but benchmarks are HIDDEN from the
+    #            default set already (`~[!benchmark]` and no filter both list
+    #            468).  So appending `,[!benchmark]` to an OR-list ADDED the
+    #            benchmarks instead of excluding them.  No benchmark term is
+    #            needed; --benchmark-samples stays a CI concern.
+    # Separate argv specs are AND-ed (intersected), not OR-ed, so an OR-list
+    # must be one comma-separated argument.
+    # ADDITIVE, not first-match-wins.  The if/elif chain this replaces was
+    # itself a fail-open: a diff touching two mapped areas selected the FIRST
+    # arm only and ran zero tests for the second while reporting a green gate.
+    # Not hypothetical -- it is exactly how the GERG suite went unrun (every
+    # GERG change also touches src/Backends/Helmholtz/, so the Helmholtz arm
+    # swallowed it), and the same trap catches SBTL + GERG, SBTL + Helmholtz,
+    # and every future pair.  Each area contributes its tags independently and
+    # they are unioned.
     TAGS=""
     add_tags() {
         local t
@@ -247,9 +268,9 @@ else
         add_tags "[SBTL]" "[SVDSBTL]" "[SVDComponents]" "[region]"
     fi
     if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/Backends/GERG/"; then
-        # GERG backend touched.  [GERG] is NOT a subset of [Helmholtz]:
-        # every GERG case carries only the [GERG] tag.  The Helmholtz
-        # umbrella is added too because GERGMixtureBackend derives from
+        # GERG backend touched.  [GERG] is NOT a subset of [Helmholtz]: every
+        # GERG case carries only the [GERG] tag.  The Helmholtz umbrella comes
+        # along because GERGMixtureBackend derives from
         # HelmholtzEOSMixtureBackend and shares its reducing function.
         add_tags "[GERG]" "[Helmholtz]" "[REFPROP]"
     fi
@@ -258,59 +279,73 @@ else
         # and flash routines.
         add_tags "[Helmholtz]" "[REFPROP]"
     fi
-    if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/(CoolProp|CoolPropLib|AbstractState)\.cpp$"; then
-        # The public entry points.  These files have no backend of their own,
-        # so no arm above matches them and — before this arm existed — a diff
-        # confined to them fell through to the (vacuous) default and ran
-        # NOTHING.  That is how an enum-class rewrite inside _PropsSI_outputs,
-        # in CoolProp's single most-used code path, went through the gate
-        # untested.  [PropsSI] is the suite that exercises them directly.
+    if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/(CoolProp|CoolPropLib|AbstractState)\\.cpp$"; then
+        # The public entry points.  They have no backend of their own, so no
+        # arm above matches them and a diff confined to them used to fall
+        # through to the default sweep.  [PropsSI] is the suite that exercises
+        # them directly; naming it means a change there is tested by the
+        # narrow arms too, not only by the (slow) default.
         add_tags "[PropsSI]" "[Helmholtz]"
     fi
+    # TAGS is already the comma-separated OR-list Catch2 wants, so it is used
+    # verbatim -- deliberately NOT re-split with `for t in ${TAGS//,/ }`,
+    # which would be an UNQUOTED expansion of bracketed words and therefore a
+    # glob evaluated against $REPO_ROOT: a one-character file named `G` there
+    # would silently rewrite [GERG] and shrink the run.
     if [ -z "$TAGS" ]; then
-        # No path -> tag arm matched.  The old fallback was
-        # TAG_FILTER="[!slow][!benchmark]", which in this Catch2 selects ZERO
-        # tests ([!slow] is a hidden-tag SELECTOR, not an exclusion) -- but it
-        # exits 2 while doing so, so the exit-status arm below already turned
-        # it into a hard FAIL.  This arm must therefore also FAIL, not skip:
-        # downgrading it to a skip would let every diff outside the four
-        # mapped areas push with no tests run at all, which is a LOOSER gate
-        # than before.  The right long-term filter is ~[slow]~[benchmark]
-        # (440 cases), blocked on a known pre-existing failure
-        # (VLERoutines.cpp:3211, PT flash two-phase, 7.196e-10 vs 1e-10) --
-        # bd CoolProp-8yrc.  Until then this is loud and blocking, with a
-        # message that says what to run instead.
-        fail "tests (no path->tag arm matched this diff, and the default filter selects zero tests -- bd CoolProp-8yrc. Run: ./build_catch/CatchTestRunner '~[slow]~[benchmark]'  -- or --skip=tests if this diff genuinely needs no test scope)"
+        # Default: run everything fast (skip the [slow] long tests).
+        TAG_FILTER="~[slow]"
     else
-        # `~[benchmark]~[!benchmark]` is appended to EVERY term, not once at
-        # the end.  Comma is OR in a Catch2 test spec, so the old trailing
-        # ",[!benchmark]" did not exclude anything -- it SELECTED the hidden
-        # reserved-tag cases and ADDED them to the run (measured: 78 -> 85).
-        # Exclusions have to sit inside each OR term to apply to it.
-        TAG_FILTER=""
-        for tag in ${TAGS//,/ }; do
-            TAG_FILTER="${TAG_FILTER:+$TAG_FILTER,}${tag}~[benchmark]~[!benchmark]"
-        done
-        echo "  tag filter: $TAG_FILTER"
-        # THREE independent conditions, because each one alone fails open:
-        #   - exit status: a runner that segfaults or is OOM-killed prints no
-        #     "failed"/"Errors:" line at all, so a text-only match (what this
-        #     used to be) reported green for a suite that never finished;
-        #   - summary text: catches any Catch2 that reports failures with a
-        #     zero exit status;
-        #   - a non-zero test COUNT: Catch2 exits 0 and prints "No tests ran"
-        #     when a filter matches nothing, which is a gate that passes
-        #     precisely because it checked nothing.
-        TESTS_RC=0
-        ./build_catch/CatchTestRunner $TAG_FILTER > /tmp/preflight-tests.log 2>&1 || TESTS_RC=$?
-        tail -3 /tmp/preflight-tests.log
-        if [ "$TESTS_RC" -ne 0 ] || tail -3 /tmp/preflight-tests.log | grep -qE "failed|Errors:"; then
-            fail "tests (exit $TESTS_RC; see /tmp/preflight-tests.log)"
-        elif ! grep -qE "^(All tests passed \(|[0-9]+ assertions in )" /tmp/preflight-tests.log \
-             && ! grep -qE "^assertions:[[:space:]]+[1-9]" /tmp/preflight-tests.log; then
-            fail "tests (filter '$TAG_FILTER' ran no assertions at all; see /tmp/preflight-tests.log)"
+        TAG_FILTER="$TAGS"
+    fi
+    echo "  tag filter: $TAG_FILTER"
+    # Gate on the runner's EXIT CODE, not on grepping its output.  The old
+    # form piped into `grep -qE "failed|Errors:"`, so the `if` saw grep's
+    # status and the runner's was discarded -- a zero-match run (exit 2,
+    # "No tests ran") contains neither word and was reported as a pass.
+    # Also require a non-zero test count, so a filter that stops matching
+    # after a rename fails loudly instead of silently testing nothing.  That
+    # count alone only catches a TOTALLY stale filter, though: rename one tag
+    # out of the comma-separated OR-lists below and the rest still match, so
+    # the gate would pass while testing less.  `--warn UnmatchedTestSpec` on
+    # the run closes that -- Catch2 then exits 3 (UnmatchedTestSpecExitCode)
+    # if any single term matched nothing.  Verified: "[cbor],[NoSuchTag]"
+    # exits 3 on a run.  Note it does NOT work on --list-tests (exits 0
+    # there), which is why it is on the run and not the listing.
+    #
+    # Count the cases via `--list-tests --verbosity quiet`, which prints one
+    # test name per line and nothing else.  Deliberately NOT parsing the
+    # human-readable "N matching test cases" summary: that string is a
+    # presentation detail that a Catch2 upgrade can reword, and if it ever
+    # stopped matching, the count would silently read 0.  Line counting also
+    # lets the listing's own exit status stay meaningful -- a non-zero exit
+    # here means the listing itself failed (missing/broken runner), which is
+    # distinct from a filter that legitimately matches nothing (exit 0, no
+    # lines).  No `2>/dev/null` and no `|| echo 0`: swallowing either the
+    # stderr or the status is what lets a gate fail open.
+    test_log="$(mktemp "${TMPDIR:-/tmp}/preflight-tests.XXXXXX")"
+    if ! listed_tests=$(./build_catch/CatchTestRunner "$TAG_FILTER" \
+                            --list-tests --verbosity quiet); then
+        fail "tests (could not list cases for filter '$TAG_FILTER' -- is the runner intact?)"
+    else
+        matched=$(printf '%s\n' "$listed_tests" | awk 'NF { c++ } END { print c + 0 }')
+        if [ "$matched" -eq 0 ]; then
+            fail "tests (filter '$TAG_FILTER' matched 0 test cases -- filter is stale, not a pass)"
+        # tee to the log but NOT to the terminal: streaming all ~410 cases here
+        # would bury the cppcheck/clang-tidy/semgrep results and the summary
+        # below it.  `>/dev/null` does not cost the exit status -- under
+        # pipefail the pipeline still reports the runner's non-zero status, not
+        # tee's (verified).  On failure the tail is echoed so there is context
+        # without having to open the log.
+        elif ./build_catch/CatchTestRunner "$TAG_FILTER" \
+                 --warn UnmatchedTestSpec 2>&1 | tee "$test_log" >/dev/null; then
+            ok "tests ($TAG_FILTER, $matched cases listed)"
         else
-            ok "tests ($TAG_FILTER)"
+            # `|| true` guards the DISPLAY only: without it a tail failure
+            # would abort the script under `set -e` before `fail` records the
+            # result.  It cannot mask the gate -- `fail` runs unconditionally.
+            tail -15 "$test_log" || true
+            fail "tests ($TAG_FILTER; full log: $test_log)"
         fi
     fi
 fi
@@ -398,26 +433,19 @@ else
         if grep -q "^warning:.*skipping" /tmp/preflight-clang-tidy.log; then
             skip "clang-tidy" "$(grep -m1 '^warning:' /tmp/preflight-clang-tidy.log | sed 's/^warning: //')"
         else
-            # `|| true`, NOT `|| echo 0`: grep -c already PRINTS 0 when there
-            # is no match, it just exits 1 while doing so.  Appending another
-            # "0" produced the two-line value "0\n0", which made the
-            # `[ "$SIGNAL_COUNT" -gt 0 ]` test below abort with "integer
-            # expression expected" — and an erroring test is a FALSE test, so
-            # the stage silently reported OK instead of comparing anything.
+            # `|| echo 0` appended a second line (grep -c prints 0 then exits
+            # 1).  Harmless here, but the same construct on SIGNAL_COUNT below
+            # fed a numeric test and errored on every clean run.
             RAW="$(grep -cE 'warning: |error: ' /tmp/preflight-clang-tidy.log 2>/dev/null | head -1 || true)"
+            [ -n "$RAW" ] || RAW=0
             # Each finding line ends with `[<check-name>,-warnings-as-errors]`
             # or `[<check-name>]`.  Match the bracketed check name and
             # exclude any line whose name is in NOISE_PATTERN.
             SIGNAL_LINES="$(grep -E 'warning: |error: ' /tmp/preflight-clang-tidy.log 2>/dev/null \
                 | grep -vE "\\[($NOISE_PATTERN)(,|\\])" || true)"
             SIGNAL_COUNT="$(printf '%s\n' "$SIGNAL_LINES" | grep -c . || true)"
-            # Belt and braces: if SIGNAL_COUNT is somehow not a plain integer
-            # the comparison below would error out and be read as "false",
-            # i.e. the stage would pass without having checked anything.
-            # Treat an unparseable count as a failure instead.
-            if ! printf '%s' "$SIGNAL_COUNT" | grep -qE '^[0-9]+$'; then
-                fail "clang-tidy (could not parse finding count '$SIGNAL_COUNT'; see /tmp/preflight-clang-tidy.log)"
-            elif [ "$SIGNAL_COUNT" -gt 0 ]; then
+            [ -n "$SIGNAL_COUNT" ] || SIGNAL_COUNT=0
+            if [ "$SIGNAL_COUNT" -gt 0 ]; then
                 printf '\n--- signal findings (noise-filtered, see #2926) ---\n'
                 printf '%s\n' "$SIGNAL_LINES" | head -30
                 printf '%s\n' "$SIGNAL_LINES" > /tmp/preflight-clang-tidy-signal.log
@@ -482,10 +510,81 @@ else
         echo "no uvx or python3 on PATH" >"$SCHEMA_LOG"
     fi
     if [ "$SCHEMA_RC" -eq 0 ]; then
-        ok "schema-validate ($(grep -c '^OK' "$SCHEMA_LOG" 2>/dev/null || echo 0) data file(s) validated)"
+        SCHEMA_N="$(grep -c '^OK' "$SCHEMA_LOG" 2>/dev/null || true)"
+        [ -n "$SCHEMA_N" ] || SCHEMA_N=0
+        ok "schema-validate ($SCHEMA_N data file(s) validated)"
     else
         tail -30 "$SCHEMA_LOG"
         fail "schema-validate (see $SCHEMA_LOG)"
+    fi
+fi
+
+# ---------- check 8: incompressible JSON sanity -----------------------
+#
+# Guards the committed json/*.json against unfitted placeholders, all-zero
+# templates, non-numeric or non-finite values, and blocks the C++ loader would
+# reject; also the grid-axis ordering contract and the golden-master refit.
+# Nothing ran any of it before this check.  Scoped to runs touching the
+# incompressible data or its writer.  The pytest path runs the whole directory;
+# the fallback below runs only test_json_sanity.py, the one module that needs
+# neither numpy nor scipy.
+step "incompressible JSON sanity"
+if skip_check incomp-sanity; then
+    skip "incomp-sanity" "--skip=incomp-sanity"
+elif ! printf '%s\n' "$ALL_PATHS" | grep -qE '^dev/incompressible_liquids/'; then
+    skip "incomp-sanity" "no dev/incompressible_liquids/ files in diff"
+else
+    INCOMP_LOG=/tmp/preflight-incomp-sanity.log
+    INCOMP_RC=0
+    if ! command -v python3 >/dev/null 2>&1; then
+        INCOMP_RC=127
+        echo "no python3 on PATH" >"$INCOMP_LOG"
+    elif python3 -c 'import pytest' >/dev/null 2>&1; then
+        # --color=no is load-bearing: with PY_COLORS/FORCE_COLOR set pytest
+        # emits ANSI even when redirected, so the count grep below scores 0 and
+        # a passing run is reported as "verified nothing".
+        python3 -m pytest dev/incompressible_liquids/ -q --color=no >"$INCOMP_LOG" 2>&1 || INCOMP_RC=$?
+    else
+        # pytest is not required: the checks are plain asserts, so call them
+        # directly rather than skip the gate.  Exiting non-zero on an empty or
+        # renamed module matters, else it would report a clean pass.
+        python3 - >"$INCOMP_LOG" 2>&1 <<'PY' || INCOMP_RC=$?
+import importlib.util, inspect, pathlib, sys
+
+path = pathlib.Path("dev/incompressible_liquids/test_json_sanity.py")
+spec = importlib.util.spec_from_file_location("test_json_sanity", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+names = sorted(n for n in dir(module) if n.startswith("test_"))
+if not names:
+    sys.exit("no test_* functions found in {0}".format(path))
+for name in names:
+    func = getattr(module, name)
+    # Calling a generator function only builds a generator; no assert runs.
+    # pytest errors on yield-tests, so match that instead of passing green.
+    if inspect.isgeneratorfunction(func):
+        sys.exit("{0} is a generator function; its asserts would never run".format(name))
+    result = func()
+    if result is not None:
+        sys.exit("{0} returned {1!r}, expected None".format(name, result))
+    print("OK", name)
+PY
+    fi
+    if [ "$INCOMP_RC" -eq 0 ]; then
+        # grep -c prints 0 and returns 1, so `|| true` (not `|| echo 0`) keeps
+        # one line.  The count gates the pass: pytest exits 0 when every test is
+        # skipped, and a green "0 check group(s)" would be a fail-open.
+        INCOMP_N="$(grep -cE '^(OK|[0-9]+ passed)' "$INCOMP_LOG" 2>/dev/null || true)"
+        [ -n "$INCOMP_N" ] || INCOMP_N=0
+        if [ "$INCOMP_N" -gt 0 ]; then
+            ok "incomp-sanity ($INCOMP_N check group(s))"
+        else
+            tail -30 "$INCOMP_LOG"
+            fail "incomp-sanity (ran but verified nothing; all tests skipped?)"
+        fi
+    else
+        tail -30 "$INCOMP_LOG"
+        fail "incomp-sanity (see $INCOMP_LOG)"
     fi
 fi
 
