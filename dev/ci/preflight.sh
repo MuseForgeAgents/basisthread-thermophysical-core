@@ -259,7 +259,16 @@ else
         add_tags "[Helmholtz]" "[REFPROP]"
     fi
     if [ -z "$TAGS" ]; then
-        # Default: run everything fast (skip the [slow] long tests).
+        # Default: intended as "run everything fast".  KNOWN BROKEN and
+        # deliberately left alone here: in this Catch2 version `[!slow]` is a
+        # hidden-tag SELECTOR, not an exclusion, so `[!slow][!benchmark]`
+        # matches ZERO tests and this arm reports OK having run nothing.  The
+        # correct form is `~[slow]~[benchmark]`, which selects 440 cases — but
+        # that sweep currently has a known pre-existing failure
+        # (VLERoutines.cpp:3211, PT flash two-phase, 7.196e-10 vs 1e-10), so
+        # switching it here would start blocking every unrelated push.  Fixing
+        # the filter and the failure together is bd CoolProp-8yrc; do not
+        # "fix" just the filter.
         TAG_FILTER="[!slow][!benchmark]"
     else
         TAG_FILTER="$TAGS,[!benchmark]"
