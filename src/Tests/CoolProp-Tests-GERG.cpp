@@ -1809,9 +1809,20 @@ TEST_CASE("GERG refuses set_reference_stateS instead of silently ignoring it", "
         // the throw must not depend on the argument being recognisable.
         CHECK_THROWS_AS(CoolProp::set_reference_stateS(fluid, "NOT_A_REFERENCE_STATE"), CoolProp::NotImplementedError);
     }
-    // ...and the throw is scoped to GERG: HEOS is untouched.  RESET is used
-    // rather than a real reference state so this test leaves no global
-    // fluid-library offset behind for whatever runs next.
+    // Both accepted spellings.  DataStructures.cpp registers a family name
+    // ("GERG2008") AND a backend name ("GERG2008Backend") for each backend and
+    // AbstractState::factory takes either, so a guard written as a literal
+    // string comparison against the family name lets "GERG2008Backend::"
+    // through -- which is exactly what the first version of this guard did.
+    CHECK_THROWS_AS(CoolProp::set_reference_stateS("GERG2008Backend::Methane", "NBP"), CoolProp::NotImplementedError);
+    CHECK_THROWS_AS(CoolProp::set_reference_stateS("GERG2004Backend::Methane", "NBP"), CoolProp::NotImplementedError);
+
+    // ...and the throw is scoped to GERG: HEOS is untouched.  RESET is the
+    // restore idiom, chosen because it zeroes the offset rather than setting
+    // one.  It is NOT a complete no-op -- it flips the fluid entry's
+    // EnthalpyEntropyOffset.enabled flag and rewrites reduce.hmolar by about
+    // 1.6e-4 relative -- but h and s at any state are bit-identical
+    // afterwards, which is what the rest of the suite depends on.
     CHECK_NOTHROW(CoolProp::set_reference_stateS("HEOS::Methane", "RESET"));
     CHECK_THROWS_AS(CoolProp::set_reference_stateS("HEOS::Methane", "NOT_A_REFERENCE_STATE"), CoolProp::ValueError);
 }

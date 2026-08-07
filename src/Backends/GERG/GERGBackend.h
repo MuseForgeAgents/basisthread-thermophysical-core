@@ -140,9 +140,12 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
     /// GERG publishes no acentric factor, so make_gerg_fluid leaves
     /// EquationOfState::acentric at the _HUGE sentinel.  The INHERITED
     /// calc_acentric_factor returns that sentinel verbatim, i.e.
-    /// `AS->acentric_factor()` and `PropsSI("acentric", ...)` answer `+inf` --
-    /// a non-answer dressed as an answer, which is precisely what every other
-    /// row of the strictness table refuses to do.  Throwing instead also
+    /// `AS->acentric_factor()` answers `+inf` -- a non-answer dressed as an
+    /// answer, which is precisely what every other row of the strictness table
+    /// refuses to do.  (Note this override does NOT change what
+    /// `PropsSI("acentric", ...)` returns: PropsSI catches every exception and
+    /// returns `_HUGE`, which is `+inf` again.  Only the low-level accessors
+    /// and `errstring` change.)  Throwing instead also
     /// names the cause of the mixture-VLE failures documented in
     /// Web/coolprop/GERG.rst: CoolProp's Wilson K-factor seed and
     /// FlashRoutines::T_DP_PengRobinson both read the acentric factor, and

@@ -951,6 +951,27 @@ double saturation_ancillary(const std::string& fluid_name, const std::string& ou
 
     return HEOS.saturation_ancillary(iOutput, Q, iInput, value);
 }
+/// True if `backend` names either GERG family.
+///
+/// Resolves through extract_backend_families rather than comparing strings,
+/// because DataStructures.cpp registers TWO accepted spellings per backend --
+/// the family name ("GERG2008") and the backend name ("GERG2008Backend") --
+/// and AbstractState::factory accepts both.  A literal `backend == "GERG2008"`
+/// therefore leaves "GERG2008Backend::Methane" outside the guard, and any
+/// future alias would escape it too.
+static bool is_gerg_backend_string(const std::string& backend) {
+    backend_families f1 = INVALID_BACKEND_FAMILY, f2 = INVALID_BACKEND_FAMILY;
+    extract_backend_families(backend, f1, f2);
+    // f2 is checked as well so that a composed string ("<something>&GERG2008")
+    // cannot smuggle a GERG state past the guard.
+    for (backend_families f : {f1, f2}) {
+        if (f == GERG2004_BACKEND_FAMILY || f == GERG2008_BACKEND_FAMILY) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void set_reference_stateS(const std::string& FluidName, const std::string& reference_state) {
     std::string backend, fluid;
     extract_backend(FluidName, backend, fluid);
@@ -1031,7 +1052,7 @@ void set_reference_stateS(const std::string& FluidName, const std::string& refer
         } else {
             throw ValueError(format("Reference state string is invalid: [%s]", reference_state.c_str()));
         }
-    } else if (backend == "GERG2004" || backend == "GERG2008") {
+    } else if (is_gerg_backend_string(backend)) {
         // The GERG backends do not read CoolProp's global fluid library, so
         // set_fluid_enthalpy_entropy_offset -- which is how both branches
         // above apply the change -- would write an offset into a JSON fluid
@@ -1042,16 +1063,33 @@ void set_reference_stateS(const std::string& FluidName, const std::string& refer
         // got no error and no change, and kept computing in the old
         // convention.  Not even the reference_state string was validated.
         // Throwing is the strictness rule this backend family is built on.
+        //
+        // The test is on the resolved backend FAMILY, not on the literal
+        // string: "GERG2008" and "GERG2008Backend" are both accepted factory
+        // spellings for the same backend (DataStructures.cpp registers a
+        // family name and a backend name for each), so a string comparison
+        // against "GERG2008" alone left "GERG2008Backend::Methane" walking
+        // straight past this guard and back into the silent no-op.
         throw NotImplementedError(
           format("set_reference_stateS is not implemented for the %s backend. These backends fix h = s = 0 for the IDEAL GAS at 298.15 K and "
                  "101325 Pa; see the GERG documentation for how to compare them against HEOS.",
                  backend.c_str()));
     }
-    // NOTE: any OTHER unrecognised backend prefix still falls off the end of
-    // this chain and silently does nothing -- a pre-existing fail-open that
-    // predates this change and is deliberately not widened here, because
-    // making it throw would change behaviour for SRK/PR/PCSAFT/INCOMP callers
-    // that have relied on the no-op for years.  Tracked separately.
+    // NOTE: two fail-open holes remain here, both PRE-EXISTING and neither
+    // widened by the GERG arm above.
+    //
+    // 1. Any other unrecognised backend prefix (SRK, PR, VTPR, PCSAFT,
+    //    INCOMP, ...) still falls off the end of this chain and silently does
+    //    nothing.  Making it throw would change behaviour for callers that
+    //    have relied on the no-op for years, so it needs its own decision.
+    //
+    // 2. A FluidName with no "::" at all resolves to backend "?" and takes the
+    //    HEOS arm above.  That is the documented default and cannot be
+    //    improved here -- the string genuinely carries no backend information
+    //    -- but it does mean set_reference_stateS("Methane", "NBP") adjusts
+    //    the HEOS fluid library and has no effect on a GERG state, silently.
+    //
+    // Both are bd CoolProp-mh1q.
 }
 void set_reference_stateD(const std::string& FluidName, double T, double rhomolar, double hmolar0, double smolar0) {
     std::vector<std::string> _comps(1, FluidName);

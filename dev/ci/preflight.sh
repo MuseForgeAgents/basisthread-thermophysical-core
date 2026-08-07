@@ -234,8 +234,12 @@ else
     add_tags() {
         local t
         for t in "$@"; do
+            # "$t" is QUOTED inside the pattern: a tag is bracketed
+            # ("[GERG]") and an unquoted expansion is a glob bracket
+            # expression on shells that re-glob it, which would make the
+            # dedupe silently stop working.
             case ",$TAGS," in
-                *",$t,"*) ;;                              # already present
+                *",${t},"*) ;;                            # already present
                 *) TAGS="${TAGS:+$TAGS,}$t" ;;
             esac
         done
@@ -258,36 +262,51 @@ else
         # and flash routines.
         add_tags "[Helmholtz]" "[REFPROP]"
     fi
+    if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/(CoolProp|CoolPropLib|AbstractState)\.cpp$"; then
+        # The public entry points.  These files have no backend of their own,
+        # so no arm above matches them and — before this arm existed — a diff
+        # confined to them fell through to the (vacuous) default and ran
+        # NOTHING.  That is how an enum-class rewrite inside _PropsSI_outputs,
+        # in CoolProp's single most-used code path, went through the gate
+        # untested.  [PropsSI] is the suite that exercises them directly.
+        add_tags "[PropsSI]" "[Helmholtz]"
+    fi
     if [ -z "$TAGS" ]; then
-        # Default: intended as "run everything fast".  KNOWN BROKEN and
-        # deliberately left alone here: in this Catch2 version `[!slow]` is a
-        # hidden-tag SELECTOR, not an exclusion, so `[!slow][!benchmark]`
-        # matches ZERO tests and this arm reports OK having run nothing.  The
-        # correct form is `~[slow]~[benchmark]`, which selects 440 cases — but
-        # that sweep currently has a known pre-existing failure
-        # (VLERoutines.cpp:3211, PT flash two-phase, 7.196e-10 vs 1e-10), so
-        # switching it here would start blocking every unrelated push.  Fixing
-        # the filter and the failure together is bd CoolProp-8yrc; do not
-        # "fix" just the filter.
-        TAG_FILTER="[!slow][!benchmark]"
+        # No path -> tag arm matched.  This used to fall back to
+        # TAG_FILTER="[!slow][!benchmark]", which in this Catch2 selects ZERO
+        # tests ([!slow] is a hidden-tag SELECTOR, not an exclusion) and so
+        # printed a green "tests" line having run nothing at all.  The correct
+        # exclusion is ~[slow]~[benchmark] — 440 cases — but that sweep has a
+        # known pre-existing failure (VLERoutines.cpp:3211, PT flash two-phase,
+        # 7.196e-10 vs 1e-10), so turning it on here would block every
+        # unrelated push on an unrelated bug.  Reporting SKIP is the honest
+        # middle: it says out loud that this gate did not run, and it shows in
+        # the summary as skipped rather than passed.  Fixing the filter and the
+        # failure together is bd CoolProp-8yrc.
+        skip "tests" "no path->tag arm matched; the default filter is bd CoolProp-8yrc (run ./build_catch/CatchTestRunner '~[slow]~[benchmark]' by hand)"
     else
         TAG_FILTER="$TAGS,[!benchmark]"
-    fi
-    echo "  tag filter: $TAG_FILTER"
-    # Both the exit status AND the summary text are checked.  The text
-    # match alone fails OPEN on a crash: a runner that segfaults or is
-    # OOM-killed prints no "failed"/"Errors:" line at all, so the old
-    # `| tail -3 | grep -q` form reported a green gate for a suite that
-    # never finished.  The text match is kept as well because it costs
-    # nothing and catches any future Catch2 that reports failures with a
-    # zero exit status.
-    TESTS_RC=0
-    ./build_catch/CatchTestRunner $TAG_FILTER > /tmp/preflight-tests.log 2>&1 || TESTS_RC=$?
-    tail -3 /tmp/preflight-tests.log
-    if [ "$TESTS_RC" -ne 0 ] || tail -3 /tmp/preflight-tests.log | grep -qE "failed|Errors:"; then
-        fail "tests (exit $TESTS_RC; see /tmp/preflight-tests.log)"
-    else
-        ok "tests ($TAG_FILTER)"
+        echo "  tag filter: $TAG_FILTER"
+        # THREE independent conditions, because each one alone fails open:
+        #   - exit status: a runner that segfaults or is OOM-killed prints no
+        #     "failed"/"Errors:" line at all, so a text-only match (what this
+        #     used to be) reported green for a suite that never finished;
+        #   - summary text: catches any Catch2 that reports failures with a
+        #     zero exit status;
+        #   - a non-zero test COUNT: Catch2 exits 0 and prints "No tests ran"
+        #     when a filter matches nothing, which is a gate that passes
+        #     precisely because it checked nothing.
+        TESTS_RC=0
+        ./build_catch/CatchTestRunner $TAG_FILTER > /tmp/preflight-tests.log 2>&1 || TESTS_RC=$?
+        tail -3 /tmp/preflight-tests.log
+        if [ "$TESTS_RC" -ne 0 ] || tail -3 /tmp/preflight-tests.log | grep -qE "failed|Errors:"; then
+            fail "tests (exit $TESTS_RC; see /tmp/preflight-tests.log)"
+        elif ! grep -qE "^(All tests passed \(|[0-9]+ assertions in )" /tmp/preflight-tests.log \
+             && ! grep -qE "^assertions:[[:space:]]+[1-9]" /tmp/preflight-tests.log; then
+            fail "tests (filter '$TAG_FILTER' ran no assertions at all; see /tmp/preflight-tests.log)"
+        else
+            ok "tests ($TAG_FILTER)"
+        fi
     fi
 fi
 

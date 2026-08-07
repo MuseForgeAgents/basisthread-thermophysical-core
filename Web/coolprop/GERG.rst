@@ -305,8 +305,9 @@ Saturation states below the enforced ``Tmin``
 Seven components have a fitted saturation ancillary whose low-temperature end
 lies *below* the enforced ``Tmin``: methane (57.17 K vs 60 K), nitrogen
 (37.86 K), oxygen (46.41 K), carbon monoxide (39.86 K), argon (45.24 K),
-hydrogen (9.96 K vs 33.19 K) and helium (1.56 K vs 5.20 K).  ``Tmin_sat()``,
-``pmin_sat()`` and ``get_state("triple_liquid")`` therefore report a state that
+hydrogen (9.96 K vs 33.19 K) and helium (1.56 K vs 5.20 K).
+``get_state("triple_liquid")`` — and, from C++, ``calc_Tmin_sat()`` /
+``calc_pmin_sat()`` on the Helmholtz backend — therefore report a state that
 ``update()`` will refuse to evaluate::
 
     AS = CP.AbstractState("GERG2008", "Methane")
@@ -321,11 +322,13 @@ Properties GERG does not define at all
 ---------------------------------------
 
 GERG publishes no acentric factor and no triple point.  ``acentric_factor()``
-throws ``NotImplementedError`` rather than returning the internal sentinel;
-``Ttriple()`` returns 0 and ``get_state("triple_liquid")`` returns the
-low-temperature end of the fitted saturation curve under a name CoolProp
-inherited — neither is a GERG triple point, because there is no such thing in
-these models.
+throws ``NotImplementedError`` rather than returning the internal sentinel.
+(``PropsSI("acentric", ...)`` still returns ``inf``, because ``PropsSI``
+converts every exception into ``_HUGE`` plus an ``errstring``; the throw is
+visible through the low-level interface.)  ``Ttriple()`` returns 0 and
+``get_state("triple_liquid")`` returns the low-temperature end of the fitted
+saturation curve under a name CoolProp inherited — neither is a GERG triple
+point, because there is no such thing in these models.
 
 ``set_reference_stateS`` is not available
 ------------------------------------------
@@ -357,9 +360,17 @@ strictness rules exist to stop a *plausible mistake*, not a determined one.
 Tabular backends wrapping GERG
 -------------------------------
 
-``BICUBIC&GERG2008`` and ``TTSE&GERG2008`` construct, but are untested and not
-supported: the tabular table-build path evaluates transport properties, which
-throw on these backends.
+``BICUBIC&GERG2008`` and ``TTSE&GERG2008`` are **not supported**.  They do not
+fail loudly, which is the problem: the table build completes without error and
+persists a cache under ``~/.CoolProp/Tables/GERG2008Backend(...)``, and then
+every lookup inside the model's own range is rejected::
+
+    AS = CP.AbstractState("BICUBIC&GERG2008", "Methane")
+    AS.update(CP.PT_INPUTS, 1e6, 300)
+    # ValueError: inputs are not in range, p=1e+06 Pa, T=300 K
+
+Delete the cache directory if you have created one.  Use the ``GERG2008``
+backend directly.
 
 Helium and hydrogen have no reachable saturation state
 -------------------------------------------------------
