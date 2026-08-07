@@ -73,12 +73,12 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
     /// (FlashRoutines.cpp:298) determines the phase from p
     /// (T_phase_determination_pure_or_pseudopure), solves rho_Tp, and
     /// RETURNS -- nothing in that path compares the resulting T to
-    /// EOS.limits.Tmax.  (T below Tmin happens to throw too, via
-    /// solver_rho_Tp's liquid branch calling
-    /// components[0].ancillaries.rhoL.evaluate(T) on an ancillary GERG fluids
-    /// never populate -- an ACCIDENT of the missing ancillary, not a range
-    /// check, and one that does not fire for the T-above-Tmax direction at
-    /// all.)  Verified empirically while writing task-10's tests: without
+    /// EOS.limits.Tmax.  (Historical note: when this override was written, T
+    /// below Tmin happened to throw as an ACCIDENT -- solver_rho_Tp's liquid
+    /// branch evaluated components[0].ancillaries.rhoL on an ancillary GERG
+    /// fluids did not populate.  Task 11 populates rhoL/rhoV/pL/pV, so that
+    /// accidental throw is GONE; the override is now the only thing enforcing
+    /// EITHER bound, not just Tmax.)  Verified empirically while writing
     /// this override, `update(PT_INPUTS, 1e5, 900.0)` on GERG2008 methane
     /// (Tmax = 700 K) returns a state instead of throwing.
     ///

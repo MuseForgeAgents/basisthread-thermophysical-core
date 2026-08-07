@@ -95,8 +95,17 @@ implementation detail of the backend and are not part of the public API.
 excess term from GERG tables instead of the global JSON library.
 `set_components` is already virtual and needs no change.
 
-This is the only modification to existing CoolProp code beyond backend
-registration.
+*(Corrected 2026-08-07.)*  This originally read "This is the only modification
+to existing CoolProp code beyond backend registration."  That is no longer
+true.  As shipped, the branch also modifies:
+
+- `src/Backends/Helmholtz/ReducingFunctions.cpp` — the removable-singularity
+  guard in `GERG2008ReducingFunction::f_Y_ij` and its two first-derivative
+  helpers (a shared fix affecting default `HEOS` too; GitHub #1677),
+- `src/CoolProp.cpp` — `is_gerg_backend_string()` and the
+  `set_reference_stateS` refusal,
+- `src/DataStructures.cpp` / `include/CoolProp/DataStructures.h` — the new
+  `backend_families` and `backends` enumerators.
 
 ### Data header layout
 
@@ -189,8 +198,13 @@ recomputes them so that `h = 0` and `s = 0` for the ideal gas at
 recomputation.  Without it, enthalpy and entropy will not match teqp even
 though pressure, `c_v`, and speed of sound will.
 
-`set_reference_stateS` remains available to users.  A reference-state change is
-a pure offset in `alpha^0` and does not alter the model.
+*(Corrected 2026-08-07.)*  This originally read "`set_reference_stateS` remains
+available to users.  A reference-state change is a pure offset in `alpha^0` and
+does not alter the model."  As shipped it **throws** `NotImplementedError` on
+the GERG backends: CoolProp applies a reference-state change by writing an
+offset into the global fluid-library entry, and the GERG backends do not read
+that library, so the call was a silent no-op.  Refusing is better than
+pretending.  See `Web/coolprop/GERG.rst`.
 
 ## Strictness
 
@@ -201,15 +215,16 @@ a pure offset in `alpha^0` and does not alter the model.
 | `set_binary_interaction_double` and friends | throw |
 | `viscosity()`, `conductivity()`, `surface_tension()` | throw `NotImplementedError` |
 | Superancillary | none attached |
-| Range | EOS limits set to GERG's extended range (60-700 K, p <= 70 MPa), enforced by a `GERGMixtureBackend::update()` override |
+| Range | EOS limits set to GERG's extended range (60-700 K, p <= 70 MPa).  A `GERGMixtureBackend::update()` override enforces the **temperature** bound only; `pmax` is deliberately NOT enforced (a valid (T, rho) point inside the two-phase dome legitimately has a pressure far outside the envelope).  *(Clarified 2026-08-07.)* |
 
 *(Corrected 2026-07-29.)*  This row originally said "enforced by CoolProp's
 existing limits machinery".  That was false and would have shipped a
 fail-open guard: `PT_flash` never compares `T` against `Tmax` at all, so the
 upper bound was unenforced, and the lower bound only appeared to work through
 an unrelated missing-ancillary accident.  The backend therefore carries its
-own `update()` override with a real range check.  Note `update_with_guesses`
-does not yet route through it — a known gap.
+own `update()` override with a real range check.  *(Updated 2026-08-07:
+`update_with_guesses` was originally recorded here as "a known gap"; it is now
+overridden too and enforces the same check.)*
 
 Mutating beta, gamma, or `F_ij` and still calling the result GERG is a category
 error, so the setters throw rather than silently producing a mutant model.

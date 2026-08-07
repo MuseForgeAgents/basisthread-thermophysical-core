@@ -276,16 +276,25 @@ else
     fi
     if printf '%s\n' "$ALL_PATHS" | grep -qE "^(src/Backends/Helmholtz/|src/Backends/REFPROP/)"; then
         # HEOS / REFPROP path touched — broader sweep including transport
-        # and flash routines.
-        add_tags "[Helmholtz]" "[REFPROP]"
+        # and flash routines.  [GERG] is included because the dependency runs
+        # BOTH ways: GERGMixtureBackend derives from HelmholtzEOSMixtureBackend
+        # and shares its reducing function, so a change under
+        # src/Backends/Helmholtz/ (e.g. the GERG2008ReducingFunction
+        # zero-mole-fraction guard, or set_mixture_parameters becoming virtual)
+        # is covered by [GERG] tests and by nothing else.  Listing only
+        # [Helmholtz] here would be the same first-match-wins fail-open this
+        # file already argues against in the other direction.
+        add_tags "[Helmholtz]" "[REFPROP]" "[GERG]"
     fi
     if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/(CoolProp|CoolPropLib|AbstractState)\\.cpp$"; then
         # The public entry points.  They have no backend of their own, so no
         # arm above matches them and a diff confined to them used to fall
         # through to the default sweep.  [PropsSI] is the suite that exercises
         # them directly; naming it means a change there is tested by the
-        # narrow arms too, not only by the (slow) default.
-        add_tags "[PropsSI]" "[Helmholtz]"
+        # narrow arms too, not only by the (slow) default.  [GERG] because
+        # is_gerg_backend_string() and the set_reference_stateS refusal both
+        # live in src/CoolProp.cpp and are pinned only by [GERG] cases.
+        add_tags "[PropsSI]" "[Helmholtz]" "[GERG]"
     fi
     # TAGS is already the comma-separated OR-list Catch2 wants, so it is used
     # verbatim -- deliberately NOT re-split with `for t in ${TAGS//,/ }`,

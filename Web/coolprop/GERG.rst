@@ -157,6 +157,12 @@ is that a helium-rich mixture reports a ``Tmin`` below 60 K: for
 artefact of the averaging rule, **not** a claim that GERG is valid at 10.68 K.
 The authoritative range is the mixture-model range in the table above.
 
+The same cap has a consequence for the **pure** fluids: because helium's and
+hydrogen's ``Tmin`` are 5.1953 K and 33.19 K rather than 60 K, ``GERG2008::Helium``
+will happily return a density at 6 K and ``GERG2008::Hydrogen`` at 34 K, with no
+error — both far below GERG's own published 60 K floor.  Nothing flags this, so
+treat any pure helium or hydrogen result below 60 K as extrapolation.
+
 What these backends deliberately do not provide
 ===============================================
 
@@ -221,15 +227,67 @@ Known limitations
 
 These are real and current.  They are stated here rather than discovered later.
 
+.. _gerg_supported_inputs:
+
+Which input pairs actually work
+--------------------------------
+
+.. warning::
+
+   For a **pure** GERG fluid, the pressure-plus-caloric input pairs
+   (``HmolarP`` / ``HmassP``, ``PSmolar`` / ``PSmass``, ``PUmolar`` /
+   ``PUmass``) **do not work at all**, and ``DmolarP`` / ``DmassP`` works only
+   sometimes.  Through ``PropsSI`` this is not an exception you can catch — it
+   is ``inf`` plus an error string.
+
+Measured on a 4x4 grid, :math:`p \in \{10^5, 10^6, 10^7, 5 \times 10^7\}` Pa
+and :math:`T \in \{200, 300, 500, 650\}` K, round-tripping a state first
+obtained from ``PT_INPUTS`` on the same backend:
+
+======================  =============  =============  =============  =============
+Backend / fluid         ``HmolarP``    ``PSmolar``    ``PUmolar``    ``DmolarP``
+======================  =============  =============  =============  =============
+``HEOS::Methane``       16/16          16/16          16/16          16/16
+``GERG2008::Methane``   **0/16**       **0/16**       **0/16**       3/16
+``GERG2008::Nitrogen``  **0/16**       **0/16**       **0/16**       2/16
+``GERG2008::CO2``       **0/16**       **0/16**       **0/16**       5/16
+======================  =============  =============  =============  =============
+
+So::
+
+    h = PropsSI("Hmolar", "P", 1e6, "T", 300, "GERG2008::Methane")
+    PropsSI("T", "P", 1e6, "Hmolar", h, "GERG2008::Methane")
+    # -> inf   (and an errstring; NOT an exception)
+
+The cause is the same missing acentric factor described in the next section.
+``solver_rho_Tp`` seeds its density iteration from an SRK estimate that reads
+the acentric factor *directly* off the equation-of-state object, so the
+``acentric_factor()`` override that throws elsewhere never intercepts it.  With
+the sentinel value in place the guess collapses to the ideal-gas density at the
+bracket's low-temperature end and the iteration diverges.  ``DmolarP`` fails by
+a second route: ``T_DP_PengRobinson`` calls ``acentric_factor()`` directly and
+the resulting ``NotImplementedError`` is not caught.
+
+**What does work**, and is covered by the test suite: ``PT``, ``DmolarT`` /
+``DmassT``, and — for pure fluids — ``QT``, ``PQ`` and ``DmolarQ``.
+
+Curiously, this affects **pure fluids only**.  The same ``HmolarP`` flash on a
+GERG *mixture* succeeds, because the mixture code path takes a different
+density-guess route.  Until this is fixed, obtain pure-fluid states from ``PT``
+or ``DmolarT`` inputs, or use ``HEOS`` when you need a caloric input pair.
+
 Mixture saturation, phase envelopes and VLE flashes do not work
 ---------------------------------------------------------------
 
 **Pure-fluid** saturation works: ``QT``, ``PQ`` and ``DQ`` inputs on
-``GERG2008::Methane`` (and every other GERG pure with a fitted ancillary)
-converge normally.
+``GERG2008::Methane`` converge normally.  All 23 GERG pure equations of state
+carry a fitted ancillary; the ones that work are those whose saturation curve
+lies inside the enforced temperature range, which is 19 of the 21 GERG-2008
+components — helium and hydrogen are the exceptions and throw
+``OutOfRangeError`` (see below).
 
-**Mixture** saturation does not.  A ``QT``, ``PQ`` or ``DQ`` flash on a GERG
-mixture, and ``build_phase_envelope()`` on a GERG mixture, currently fail::
+**Mixture** saturation does not.  A ``QT`` or ``PQ`` flash on a GERG mixture,
+and ``build_phase_envelope()`` on a GERG mixture, currently fail::
 
     AS = CP.AbstractState("GERG2008", "Methane&Ethane")
     AS.set_mole_fractions([0.9, 0.1])
@@ -242,14 +300,23 @@ mixture, and ``build_phase_envelope()`` on a GERG mixture, currently fail::
 
 The cause is that GERG publishes no acentric factor, so the GERG fluids carry
 none.  CoolProp's mixture VLE machinery seeds itself with Wilson K-factors and
-an SRK density estimate, both of which read the acentric factor; with it unset
-the initial guess is NaN and the solver has nothing to iterate from.  This is a
-missing input to the *initial guess*, not a defect in the GERG equation of
-state itself — single-phase properties, which do not use that path, are
-unaffected and are validated against teqp to 1e-10.
+an SRK density estimate, both of which read the acentric factor.  With the
+sentinel :math:`\omega = +\infty` in place the Wilson pressure estimate
+collapses to exactly zero — which is why the error above reports ``p=0`` — and
+the solver has nothing to iterate from.  This is a missing input to the
+*initial guess*, not a defect in the GERG equation of state itself:
+single-phase properties, which do not use that path, are unaffected and are
+validated against teqp to 1e-10.
 
-Until this is addressed, use GERG for single-phase mixture properties and for
-pure-fluid saturation.  For mixture phase equilibria, use ``HEOS`` or REFPROP.
+A mixture ``DQ`` flash also fails, but for an unrelated and pre-existing
+reason — ``DQ_flash not ready for mixtures`` — which fails identically on
+``HEOS`` and is not a GERG limitation.
+
+Until this is addressed, use GERG for single-phase mixture properties, and for
+pure-fluid saturation and pure-fluid ``PT`` / ``DmolarT`` states.  For mixture
+phase equilibria, use ``HEOS`` or REFPROP.  See
+:ref:`Which input pairs actually work <gerg_supported_inputs>` for the
+pure-fluid caloric-input restriction, which has the same root cause.
 
 Compositions with two or more exactly-zero mole fractions
 ----------------------------------------------------------
@@ -265,9 +332,9 @@ property, silently.  It is now partly fixed, and the split matters:
 molar mass.  These are now identical — to the last digit — to the same
 composition with the zero components trimmed away.
 
-**Still returns NaN, with no error raised.**  The composition derivatives
-:math:`\partial T_r / \partial x_i` and above, and therefore
-``fugacity()`` and ``fugacity_coefficient()``::
+**Still returns NaN, with no error raised.**  The **second and higher**
+composition derivatives — :math:`\partial^2 T_r / \partial x_i \partial x_j`
+and above — and therefore ``fugacity()`` and ``fugacity_coefficient()``::
 
     AS = CP.AbstractState("GERG2008", "Methane&Nitrogen&Ethane&Propane")
     AS.set_mole_fractions([0.9, 0.1, 0.0, 0.0])
@@ -276,11 +343,23 @@ composition with the zero components trimmed away.
     AS.fugacity_coefficient(0)    # nan         no error raised
 
 The guard that was added covers the reducing function's ``f_Y_ij`` and its two
-first-derivative helpers.  CoolProp's ``XN_DEPENDENT`` composition-derivative
-formulation — the one the fugacity API uses — does not call those helpers; it
-inlines the same :math:`0/0` expression, and it is still unguarded.  The
-trigger is ``x[N-1] == 0`` together with at least one other exactly-zero mole
-fraction.
+**first**-derivative helpers — so :math:`\partial T_r / \partial x_i` is
+correct.  It does **not** cover the second- and third-derivative helpers
+(``d2fYijdxidxj`` and friends), which contain the same :math:`0/0` and are
+reached under **both** the ``XN_INDEPENDENT`` and ``XN_DEPENDENT``
+formulations; the latter additionally inlines the expression rather than
+calling the helpers at all.
+
+Two exactly-zero mole fractions anywhere in the composition are enough to make
+those higher derivatives NaN.  Whether that surfaces through ``fugacity()``
+depends on the path: with ``x[N-1] == 0`` (as above) it does; with the zeros in
+interior positions the fugacity coefficient can still come back finite even
+though the underlying second derivatives are NaN.
+
+Guarding the higher derivatives is not simply an oversight left undone — the
+limit of :math:`\partial^2 f_{Y,ij} / \partial x_i \partial x_j` at the
+both-zero corner is genuinely **path-dependent**, so unlike the value and the
+first derivatives there is no single correct constant to substitute.
 
 **This is not GERG-specific.**  It is identical on the default ``HEOS``
 backend, and predates these backends entirely.  It is tracked as

@@ -1605,6 +1605,17 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
     // GERG's own VLE at that temperature must reproduce them -- which checks
     // the traced values, the ancillary fit at the very bottom of its range
     // (its worst-conditioned end), and the units of the stored p all at once.
+    // The `continue` below MUST be counted. Three of these six fluids --
+    // methane (end state 57.17 K), nitrogen (37.86 K) and argon (45.24 K) --
+    // have a traced end state BELOW the enforced Tmin of 60 K, so they skip
+    // today and assert nothing. Without the exact count at the end of this
+    // case, widening the range guard (e.g. GERGBackend.cpp's per-component
+    // `min(60, Tc)` becoming a flat 60.0) would make ALL SIX skip and this
+    // TEST_CASE -- the only GERG saturation test with an external
+    // teqp-traced reference -- would still report green while checking
+    // nothing. Every other sweep in this file already pins its counter;
+    // this one did not.
+    int ran = 0;
     for (const auto& name : {"Methane", "Nitrogen", "Ethane", "n-Butane", "Water", "Argon"}) {
         CAPTURE(name);
         std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
@@ -1613,6 +1624,7 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
         // and QT_flash subtracts only 1e-13 from it.
         const double T = end.T_K * (1 + 1e-9);
         if (!saturation_reachable(*AS, T)) continue;
+        ++ran;
         REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
         CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoL_molm3, 1e-6));
         // 1e-5 on p, not 1e-6: at the bottom of the fitted range the
@@ -1625,6 +1637,10 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
         AS->update(QT_INPUTS, 1.0, T);
         CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoV_molm3, 1e-6));
     }
+    // Exact, not >=: Ethane, n-Butane and Water are the three whose traced end
+    // state sits above the enforced Tmin. If that set changes in either
+    // direction, this case must be revisited rather than silently re-scoped.
+    REQUIRE(ran == 3);
 }
 
 TEST_CASE("GERG saturation is independent of the ancillary seed", "[GERG]") {
