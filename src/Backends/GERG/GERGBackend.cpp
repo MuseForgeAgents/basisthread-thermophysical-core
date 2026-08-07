@@ -31,18 +31,23 @@ GERGMixtureBackend::GERGMixtureBackend(GERGModel model, const std::vector<std::s
         fluids.push_back(GERG::make_gerg_fluid(model, GERG::resolve_component(model, user_name)));
     }
     // m_model is initialised in the member-init list above, so it is already
-    // valid here; and the object's dynamic type is already GERGMixtureBackend
-    // inside this constructor BODY, so this dispatches to the override below
-    // (ordinary most-derived-overrider dispatch, not the constructor edge
-    // case that applies while base sub-objects are still being built).
-    set_components(fluids);
+    // valid here.  The call is EXPLICITLY QUALIFIED because that is what it
+    // means: inside a GERGMixtureBackend constructor body the dynamic type is
+    // GERGMixtureBackend, so an unqualified virtual call resolves to this
+    // class's override and NOT to any further-derived override -- which is
+    // exactly the behaviour wanted, but reads as an accident and is what
+    // cppcheck's virtualCallInConstructor flags.  Writing the qualification
+    // out makes the static binding intentional rather than incidental, and
+    // keeps it correct if this class is ever subclassed.
+    GERGMixtureBackend::set_components(fluids);
     if (names.size() == 1) {
         set_mole_fractions(std::vector<CoolPropDbl>(1, 1.0));
     }
 }
 
 GERGMixtureBackend::GERGMixtureBackend(GERGModel model, const std::vector<CoolPropFluid>& fluids, bool generate_SatL_and_SatV) : m_model(model) {
-    set_components(fluids, generate_SatL_and_SatV);
+    // Qualified for the same reason as the constructor above.
+    GERGMixtureBackend::set_components(fluids, generate_SatL_and_SatV);
 }
 
 void GERGMixtureBackend::set_components(const std::vector<CoolPropFluid>& comps, bool generate_SatL_and_SatV) {

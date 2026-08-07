@@ -470,6 +470,11 @@ class PropertyLimitsSuspender
     }
     PropertyLimitsSuspender(const PropertyLimitsSuspender&) = delete;
     PropertyLimitsSuspender& operator=(const PropertyLimitsSuspender&) = delete;
+    // Deleting the copy operations already suppresses the implicit moves, but
+    // spelling them out keeps the rule of five complete and satisfies
+    // cppcoreguidelines-special-member-functions.
+    PropertyLimitsSuspender(PropertyLimitsSuspender&&) = delete;
+    PropertyLimitsSuspender& operator=(PropertyLimitsSuspender&&) = delete;
 
    private:
     bool was_set;
@@ -535,8 +540,12 @@ struct RefTally
 /// now ALSO what selects the NaN counter (via `tally.nan_counter_for`), so
 /// there is only one string to keep in sync, not a string plus a separately-
 /// chosen counter reference.
+// `computed` is taken by const reference, not as a forwarding reference: it is
+// only ever INVOKED here, never stored or moved from, so a forwarding
+// reference would promise an ownership transfer that never happens
+// (cppcoreguidelines-missing-std-forward).
 template <typename F>
-void check_field(const char* label, double reference, F&& computed, double rel_tol, RefTally& tally) {
+void check_field(const char* label, double reference, const F& computed, double rel_tol, RefTally& tally) {
     if (std::isnan(reference)) {
         ++tally.nan_counter_for(label);
         return;
@@ -1295,8 +1304,13 @@ namespace {
 bool saturation_reachable(CoolProp::AbstractState& AS, double T) {
     CoolPropDbl Tmin_satL = NAN, Tmin_satV = NAN;
     auto* heos = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(&AS);
+    // Every caller passes a GERGMixtureBackend, so this cast cannot fail
+    // today; REQUIRE rather than an early return so that a future caller
+    // passing something else fails the test loudly instead of silently
+    // reporting "saturation unreachable" and skipping the sweep.
+    REQUIRE(heos != nullptr);
     heos->calc_Tmin_sat(Tmin_satL, Tmin_satV);
-    const double T_lo = std::max(std::max(static_cast<double>(Tmin_satL), static_cast<double>(Tmin_satV)), AS.Tmin());
+    const double T_lo = std::max({static_cast<double>(Tmin_satL), static_cast<double>(Tmin_satV), static_cast<double>(AS.Tmin())});
     return T > T_lo && T < AS.T_critical();
 }
 

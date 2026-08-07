@@ -872,10 +872,20 @@ void extract_backend_families(const std::string& backend_string, backend_familie
     }
 }
 
+// The by-value `backend_string` is a pre-existing signature this branch does
+// not otherwise touch.  It is NOT changed to `const std::string&` here even
+// though clang-tidy is right on the merits: the declaration lives in the
+// installed public header DataStructures.h, so changing it would change the
+// mangled symbol name and break every consumer linking a pre-built
+// libCoolProp — a bigger break than the one being fixed, and unrelated to this
+// change.  Tracked separately for a release that already breaks ABI.
+// NOLINTNEXTLINE(performance-unnecessary-value-param)
 void extract_backend_families_string(std::string backend_string, backend_families& f1, std::string& f2) {
     auto& backend_information = get_backend_information();
     backend_families f2_enum;
-    extract_backend_families(std::move(backend_string), f1, f2_enum);
+    // extract_backend_families takes a const reference, so std::move() here
+    // could never move anything (performance-move-const-arg).
+    extract_backend_families(backend_string, f1, f2_enum);
     std::map<backend_families, std::string>::const_iterator it;
     it = backend_information.family_name_map.find(f2_enum);
     if (it != backend_information.family_name_map.end())

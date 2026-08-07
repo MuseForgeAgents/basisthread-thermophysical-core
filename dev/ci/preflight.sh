@@ -228,6 +228,15 @@ else
         # [SBTL] catches the adapter-layer tests (serializer round-trip,
         # multi-fluid PH preset) that [SVDSBTL] alone misses.
         TAG_FILTER="[SBTL],[SVDSBTL],[SVDComponents],[region],[!benchmark]"
+    elif printf '%s\n' "$ALL_PATHS" | grep -qE "^src/Backends/GERG/"; then
+        # GERG backend touched.  [GERG] is NOT a subset of [Helmholtz]:
+        # every GERG case carries only the [GERG] tag, so a diff that
+        # touches both src/Backends/GERG/ and src/Backends/Helmholtz/
+        # (which every GERG change does — GERGMixtureBackend derives from
+        # HelmholtzEOSMixtureBackend and shares its reducing function)
+        # would otherwise match the Helmholtz arm below and run zero GERG
+        # tests while reporting a green gate.  Both umbrellas run here.
+        TAG_FILTER="[GERG],[Helmholtz],[REFPROP],[!benchmark]"
     elif printf '%s\n' "$ALL_PATHS" | grep -qE "^(src/Backends/Helmholtz/|src/Backends/REFPROP/)"; then
         # HEOS / REFPROP path touched — broader sweep including transport
         # and flash routines.
@@ -237,8 +246,18 @@ else
         TAG_FILTER="[!slow][!benchmark]"
     fi
     echo "  tag filter: $TAG_FILTER"
-    if ./build_catch/CatchTestRunner $TAG_FILTER 2>&1 | tee /tmp/preflight-tests.log | tail -3 | grep -qE "failed|Errors:"; then
-        fail "tests (see /tmp/preflight-tests.log)"
+    # Both the exit status AND the summary text are checked.  The text
+    # match alone fails OPEN on a crash: a runner that segfaults or is
+    # OOM-killed prints no "failed"/"Errors:" line at all, so the old
+    # `| tail -3 | grep -q` form reported a green gate for a suite that
+    # never finished.  The text match is kept as well because it costs
+    # nothing and catches any future Catch2 that reports failures with a
+    # zero exit status.
+    TESTS_RC=0
+    ./build_catch/CatchTestRunner $TAG_FILTER > /tmp/preflight-tests.log 2>&1 || TESTS_RC=$?
+    tail -3 /tmp/preflight-tests.log
+    if [ "$TESTS_RC" -ne 0 ] || tail -3 /tmp/preflight-tests.log | grep -qE "failed|Errors:"; then
+        fail "tests (exit $TESTS_RC; see /tmp/preflight-tests.log)"
     else
         ok "tests ($TAG_FILTER)"
     fi
@@ -327,14 +346,26 @@ else
         if grep -q "^warning:.*skipping" /tmp/preflight-clang-tidy.log; then
             skip "clang-tidy" "$(grep -m1 '^warning:' /tmp/preflight-clang-tidy.log | sed 's/^warning: //')"
         else
-            RAW="$(grep -cE 'warning: |error: ' /tmp/preflight-clang-tidy.log 2>/dev/null | head -1 || echo 0)"
+            # `|| true`, NOT `|| echo 0`: grep -c already PRINTS 0 when there
+            # is no match, it just exits 1 while doing so.  Appending another
+            # "0" produced the two-line value "0\n0", which made the
+            # `[ "$SIGNAL_COUNT" -gt 0 ]` test below abort with "integer
+            # expression expected" — and an erroring test is a FALSE test, so
+            # the stage silently reported OK instead of comparing anything.
+            RAW="$(grep -cE 'warning: |error: ' /tmp/preflight-clang-tidy.log 2>/dev/null | head -1 || true)"
             # Each finding line ends with `[<check-name>,-warnings-as-errors]`
             # or `[<check-name>]`.  Match the bracketed check name and
             # exclude any line whose name is in NOISE_PATTERN.
             SIGNAL_LINES="$(grep -E 'warning: |error: ' /tmp/preflight-clang-tidy.log 2>/dev/null \
                 | grep -vE "\\[($NOISE_PATTERN)(,|\\])" || true)"
-            SIGNAL_COUNT="$(printf '%s\n' "$SIGNAL_LINES" | grep -c . || echo 0)"
-            if [ "$SIGNAL_COUNT" -gt 0 ]; then
+            SIGNAL_COUNT="$(printf '%s\n' "$SIGNAL_LINES" | grep -c . || true)"
+            # Belt and braces: if SIGNAL_COUNT is somehow not a plain integer
+            # the comparison below would error out and be read as "false",
+            # i.e. the stage would pass without having checked anything.
+            # Treat an unparseable count as a failure instead.
+            if ! printf '%s' "$SIGNAL_COUNT" | grep -qE '^[0-9]+$'; then
+                fail "clang-tidy (could not parse finding count '$SIGNAL_COUNT'; see /tmp/preflight-clang-tidy.log)"
+            elif [ "$SIGNAL_COUNT" -gt 0 ]; then
                 printf '\n--- signal findings (noise-filtered, see #2926) ---\n'
                 printf '%s\n' "$SIGNAL_LINES" | head -30
                 printf '%s\n' "$SIGNAL_LINES" > /tmp/preflight-clang-tidy-signal.log
