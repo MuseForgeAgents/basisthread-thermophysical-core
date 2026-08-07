@@ -117,7 +117,11 @@ void GERGMixtureBackend::check_gerg_range_of_validity() {
         return;
     }
     const double Tlo = Tmin(), Thi = Tmax();
-    if (_T < Tlo || _T > Thi) {
+    // !ValidNumber first: a NaN _T makes BOTH comparisons false, so the bare
+    // range test would wave it through.  Unreachable today (the base class
+    // rejects a non-finite T before this runs), but a range check that passes
+    // on NaN is a fail-open waiting for the day that stops being true.
+    if (!ValidNumber(_T) || _T < Tlo || _T > Thi) {
         throw CoolProp::OutOfRangeError(format("Temperature [%g K] is outside the GERG range of validity [%g, %g] K", _T, Tlo, Thi));
     }
 }

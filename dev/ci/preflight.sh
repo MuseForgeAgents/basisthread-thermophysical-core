@@ -222,28 +222,47 @@ else
     # Tag scope selection.  Path -> tag mapping mirrors how CI's broad
     # workflow runs the full suite, but skips the expensive `[slow]`
     # tests by default for fast local feedback.  Pass --slow to include.
-    TAG_FILTER=""
+    # ADDITIVE, not first-match-wins.  This used to be an if/elif chain, and
+    # that shape is itself a fail-open: a diff touching two areas selected the
+    # first arm only and ran ZERO tests for the second while reporting a green
+    # gate.  That is not hypothetical — it is exactly how the GERG suite went
+    # unrun (every GERG change also touches src/Backends/Helmholtz/, so the
+    # Helmholtz arm swallowed it), and the same trap catches an SBTL + GERG
+    # diff, an SBTL + Helmholtz diff, and every future pair.  Each area now
+    # contributes its tags independently and they are unioned.
+    TAGS=""
+    add_tags() {
+        local t
+        for t in "$@"; do
+            case ",$TAGS," in
+                *",$t,"*) ;;                              # already present
+                *) TAGS="${TAGS:+$TAGS,}$t" ;;
+            esac
+        done
+    }
     if printf '%s\n' "$ALL_PATHS" | grep -qE "^(src/SBTL/|include/CoolProp/sbtl/|src/Backends/SVDSBTL/|src/Region/|src/SVD/|include/CoolProp/region/|include/CoolProp/svd/)"; then
         # SBTL/SVDSBTL surface area touched — run the umbrella tags.
         # [SBTL] catches the adapter-layer tests (serializer round-trip,
         # multi-fluid PH preset) that [SVDSBTL] alone misses.
-        TAG_FILTER="[SBTL],[SVDSBTL],[SVDComponents],[region],[!benchmark]"
-    elif printf '%s\n' "$ALL_PATHS" | grep -qE "^src/Backends/GERG/"; then
+        add_tags "[SBTL]" "[SVDSBTL]" "[SVDComponents]" "[region]"
+    fi
+    if printf '%s\n' "$ALL_PATHS" | grep -qE "^src/Backends/GERG/"; then
         # GERG backend touched.  [GERG] is NOT a subset of [Helmholtz]:
-        # every GERG case carries only the [GERG] tag, so a diff that
-        # touches both src/Backends/GERG/ and src/Backends/Helmholtz/
-        # (which every GERG change does — GERGMixtureBackend derives from
-        # HelmholtzEOSMixtureBackend and shares its reducing function)
-        # would otherwise match the Helmholtz arm below and run zero GERG
-        # tests while reporting a green gate.  Both umbrellas run here.
-        TAG_FILTER="[GERG],[Helmholtz],[REFPROP],[!benchmark]"
-    elif printf '%s\n' "$ALL_PATHS" | grep -qE "^(src/Backends/Helmholtz/|src/Backends/REFPROP/)"; then
+        # every GERG case carries only the [GERG] tag.  The Helmholtz
+        # umbrella is added too because GERGMixtureBackend derives from
+        # HelmholtzEOSMixtureBackend and shares its reducing function.
+        add_tags "[GERG]" "[Helmholtz]" "[REFPROP]"
+    fi
+    if printf '%s\n' "$ALL_PATHS" | grep -qE "^(src/Backends/Helmholtz/|src/Backends/REFPROP/)"; then
         # HEOS / REFPROP path touched — broader sweep including transport
         # and flash routines.
-        TAG_FILTER="[Helmholtz],[REFPROP],[!benchmark]"
-    else
+        add_tags "[Helmholtz]" "[REFPROP]"
+    fi
+    if [ -z "$TAGS" ]; then
         # Default: run everything fast (skip the [slow] long tests).
         TAG_FILTER="[!slow][!benchmark]"
+    else
+        TAG_FILTER="$TAGS,[!benchmark]"
     fi
     echo "  tag filter: $TAG_FILTER"
     # Both the exit status AND the summary text are checked.  The text

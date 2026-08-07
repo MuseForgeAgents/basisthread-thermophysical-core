@@ -137,6 +137,31 @@ class GERGMixtureBackend : public HelmholtzEOSMixtureBackend
         throw NotImplementedError("Surface tension is not part of the GERG-2004/GERG-2008 models.");
     }
 
+    /// GERG publishes no acentric factor, so make_gerg_fluid leaves
+    /// EquationOfState::acentric at the _HUGE sentinel.  The INHERITED
+    /// calc_acentric_factor returns that sentinel verbatim, i.e.
+    /// `AS->acentric_factor()` and `PropsSI("acentric", ...)` answer `+inf` --
+    /// a non-answer dressed as an answer, which is precisely what every other
+    /// row of the strictness table refuses to do.  Throwing instead also
+    /// names the cause of the mixture-VLE failures documented in
+    /// Web/coolprop/GERG.rst: CoolProp's Wilson K-factor seed and
+    /// FlashRoutines::T_DP_PengRobinson both read the acentric factor, and
+    /// with the sentinel in place they silently produce a NaN initial guess
+    /// and fail several solver frames later with an unrelated-looking message.
+    ///
+    /// This does NOT remove working functionality: every path that consumed
+    /// the sentinel was already failing.  The paths that read
+    /// EquationOfState::acentric DIRECTLY (solver_rho_Tp_SRK, the SRK/
+    /// Xiang-Deiters alpha functions) are untouched by this override -- those
+    /// are separate and are covered by the documented limitation, not by this
+    /// throw.
+    CoolPropDbl calc_acentric_factor() override {
+        throw NotImplementedError(
+          "GERG-2004/GERG-2008 publish no acentric factor, so this backend has none. This is why mixture saturation, VLE flashes and phase "
+          "envelopes are unavailable on the GERG backends -- CoolProp's mixture VLE initial guess needs it. Use the HEOS backend if you need an "
+          "acentric factor.");
+    }
+
     /// `AbstractState::change_EOS(i, name)` (AbstractState.h:1547) is a
     /// non-virtual wrapper over this virtual hook (AbstractState.h:719) --
     /// so it is reachable directly on a plain `AbstractState*`, no downcast

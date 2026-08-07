@@ -26,8 +26,10 @@ separate backend families, not options on the default multi-fluid backend.
 * anything the model does not cover raises an exception instead of quietly
   answering from somewhere else.
 
-A number obtained from the ``GERG2008`` backend is a GERG-2008 number.  Nothing
-in it is borrowed from another correlation.
+A number obtained from the ``GERG2008`` backend is a GERG-2008 number: no
+parameter in it is borrowed from another correlation.  The refusals are
+model-level rules enforced through the documented API, not a sandbox — see
+*The strictness rules are model-level, not C++-level* below.
 
 Usage
 =====
@@ -254,24 +256,110 @@ Compositions with two or more exactly-zero mole fractions
 
 The natural way to hand over a natural-gas analysis is the full 21-name
 GERG-2008 component list with a mole fraction for each, most of them exactly
-zero.  **Single-phase properties on such a composition now work correctly**,
-and give results identical to the same composition with the zero components
-trimmed away.  That was not true before this release — see the changelog entry
-for the NaN fix.
+zero.  Until this release *every* such composition returned NaN for *every*
+property, silently.  It is now partly fixed, and the split matters:
 
-Phase envelopes and some flashes still fail on such compositions, for the
-separate reason described in the previous section (they fail for GERG mixtures
-generally, zeros or not).  For reference, on a composition with two or more
-exactly-zero mole fractions:
+**Works.**  The reducing state and everything that flows from it:
+:math:`T_r`, :math:`\rho_r`, :math:`\alpha^0`, :math:`\alpha^r`, :math:`p`,
+:math:`\rho`, :math:`c_v`, :math:`c_p`, speed of sound, :math:`h`, :math:`s`,
+molar mass.  These are now identical — to the last digit — to the same
+composition with the zero components trimmed away.
+
+**Still returns NaN, with no error raised.**  The composition derivatives
+:math:`\partial T_r / \partial x_i` and above, and therefore
+``fugacity()`` and ``fugacity_coefficient()``::
+
+    AS = CP.AbstractState("GERG2008", "Methane&Nitrogen&Ethane&Propane")
+    AS.set_mole_fractions([0.9, 0.1, 0.0, 0.0])
+    AS.update(CP.PT_INPUTS, 1e6, 300)
+    AS.rhomolar()                 # 406.94...   correct
+    AS.fugacity_coefficient(0)    # nan         no error raised
+
+The guard that was added covers the reducing function's ``f_Y_ij`` and its two
+first-derivative helpers.  CoolProp's ``XN_DEPENDENT`` composition-derivative
+formulation — the one the fugacity API uses — does not call those helpers; it
+inlines the same :math:`0/0` expression, and it is still unguarded.  The
+trigger is ``x[N-1] == 0`` together with at least one other exactly-zero mole
+fraction.
+
+**This is not GERG-specific.**  It is identical on the default ``HEOS``
+backend, and predates these backends entirely.  It is tracked as
+`GitHub #1677 <https://github.com/CoolProp/CoolProp/issues/1677>`_.
+
+Until it is fixed, if you need fugacities, **trim the zero-mole-fraction
+components out of the composition** rather than passing the full component
+list.  The trimmed result is exact.
+
+Phase envelopes and flashes fail on such compositions too, but for the
+separate reason described in the previous section — they fail for GERG
+mixtures generally, zeros or not.  For reference:
 
 * a ``HEOS`` phase envelope throws
   ``Unable to calculate at least 4 points in phase envelope; quitting``,
 * a ``GERG2008`` phase envelope or ``PQ`` flash throws
   ``Residual function in secant returned invalid number``.
 
-The remaining composition-derivative gap — NaN second and third composition
-derivatives in the shared reducing function at the both-zero corner — is
-tracked as `GitHub #1677 <https://github.com/CoolProp/CoolProp/issues/1677>`_.
+Saturation states below the enforced ``Tmin``
+----------------------------------------------
+
+Seven components have a fitted saturation ancillary whose low-temperature end
+lies *below* the enforced ``Tmin``: methane (57.17 K vs 60 K), nitrogen
+(37.86 K), oxygen (46.41 K), carbon monoxide (39.86 K), argon (45.24 K),
+hydrogen (9.96 K vs 33.19 K) and helium (1.56 K vs 5.20 K).  ``Tmin_sat()``,
+``pmin_sat()`` and ``get_state("triple_liquid")`` therefore report a state that
+``update()`` will refuse to evaluate::
+
+    AS = CP.AbstractState("GERG2008", "Methane")
+    AS.update(CP.QT_INPUTS, 0.0, 58.0)
+    # OutOfRangeError: Temperature [58 K] is outside the GERG range of validity [60, 700] K
+
+The ancillary data below ``Tmin`` is real and was traced with teqp; it is
+simply not reachable through the public API, because the model's own range of
+validity stops first.
+
+Properties GERG does not define at all
+---------------------------------------
+
+GERG publishes no acentric factor and no triple point.  ``acentric_factor()``
+throws ``NotImplementedError`` rather than returning the internal sentinel;
+``Ttriple()`` returns 0 and ``get_state("triple_liquid")`` returns the
+low-temperature end of the fitted saturation curve under a name CoolProp
+inherited — neither is a GERG triple point, because there is no such thing in
+these models.
+
+``set_reference_stateS`` is not available
+------------------------------------------
+
+It throws ``NotImplementedError`` on these backends::
+
+    CP.set_reference_state("GERG2008::Methane", "NBP")
+    # NotImplementedError: set_reference_stateS is not implemented for the
+    # GERG2008 backend. ...
+
+CoolProp applies a reference-state change by writing an offset into the global
+fluid-library entry for the fluid, and the GERG backends do not read that
+library.  Before this was made explicit the call was a **silent no-op** — it
+returned without error and without effect, and did not even validate the
+reference-state string.  See *Reference state* below for what to do instead.
+
+The strictness rules are model-level, not C++-level
+----------------------------------------------------
+
+The throws listed under *What these backends deliberately do not provide*
+cover the documented API.  They are not a sandbox.  From C++ it remains
+possible to reach past them — for example ``Reducing->set_binary_interaction_double(...)``
+on the reducing-function object, direct assignment into
+``residual_helmholtz->Excess.F[i][j]``, or ``update_DmolarT_direct()``, which
+bypasses the range check by design because it is what the backend uses to
+build its own fluids.  These are documented in ``GERGBackend.h``.  The
+strictness rules exist to stop a *plausible mistake*, not a determined one.
+
+Tabular backends wrapping GERG
+-------------------------------
+
+``BICUBIC&GERG2008`` and ``TTSE&GERG2008`` construct, but are untested and not
+supported: the tabular table-build path evaluates transport properties, which
+throw on these backends.
 
 Helium and hydrogen have no reachable saturation state
 -------------------------------------------------------
@@ -328,9 +416,9 @@ reference-state effect.
 **Any cross-check of a GERG backend against ``HEOS`` must compare *differences*
 in** :math:`h` **and** :math:`s` **, never absolute values.**  Comparing
 absolute enthalpies will make a correct implementation look catastrophically
-wrong.  ``set_reference_stateS`` remains available if you need a different
-convention; a reference-state change is a pure offset in :math:`\alpha^0` and
-does not alter the model.
+wrong.  ``set_reference_stateS`` is **not** available as an escape hatch here
+(see above) — subtract your own offset, or take a single reference point from
+each backend and compare everything relative to it.
 
 Relationship to CoolProp's default HEOS mixture model
 =====================================================
@@ -388,8 +476,10 @@ specifically ``include/teqp/models/GERG/GERG.hpp``.  The coefficient tables in
 CoolProp's GERG backend are transcribed from it, with a durable verification
 script (``dev/gerg/verify_transcription.py``) that checks every table family
 against teqp, and the test suite compares against teqp-generated reference
-values at relative tolerances of 1e-9 to 1e-10.  teqp's own values are in turn
-checked against the AGA8 reference implementation.
+values at relative tolerances of 1e-12 for :math:`\alpha^r` and
+:math:`\alpha^{ig}` and 1e-10 for :math:`p`, :math:`c_v` and the speed of
+sound.  teqp's own values are in turn checked against the AGA8 reference
+implementation.
 
 The design of record for these backends — including the rationale for every
 strictness rule above — is

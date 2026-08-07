@@ -11,6 +11,7 @@
 
 #    include "CoolProp/AbstractState.h"
 #    include "CoolProp/Configuration.h"
+#    include "CoolProp/CoolProp.h"
 #    include "CoolProp/DataStructures.h"
 #    include "CoolProp/Exceptions.h"
 
@@ -1216,9 +1217,13 @@ TEST_CASE("GERG fluids carry no superancillary", "[GERG]") {
     // Setzmann-Wagner-class saturation densities labelled GERG-2008 -- with
     // no error anywhere, since the superancillary path is a deliberate
     // shortcut, not a bug.
-    auto* gerg = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
-    std::shared_ptr<CoolProp::HelmholtzEOSMixtureBackend> holder(gerg);
-    CHECK(holder->get_superanc() == nullptr);
+    // The factory result is owned FIRST and cast SECOND: casting first and
+    // then adopting the cast pointer leaks the allocation (and null-derefs on
+    // the next line) if the cast ever fails.
+    std::shared_ptr<AbstractState> owned(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    auto* gerg = dynamic_cast<CoolProp::HelmholtzEOSMixtureBackend*>(owned.get());
+    REQUIRE(gerg != nullptr);
+    CHECK(gerg->get_superanc() == nullptr);
 }
 
 TEST_CASE("GERG respects its range of validity", "[GERG]") {
@@ -1785,6 +1790,89 @@ TEST_CASE("GERG saturation round-trips through pressure and quality inputs", "[G
     std::shared_ptr<AbstractState> dq(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
     REQUIRE_NOTHROW(dq->update(DmolarQ_INPUTS, rhoL, 0.0));
     CHECK_THAT(dq->T(), Catch::Matchers::WithinRel(T, 1e-6));
+}
+
+TEST_CASE("GERG refuses set_reference_stateS instead of silently ignoring it", "[GERG]") {
+    // set_reference_stateS dispatches on the backend prefix and, before the
+    // GERG arm existed, had no final else: "GERG2008::Methane" matched
+    // neither the REFPROP nor the HEOS branch, so the call returned having
+    // done NOTHING -- not even validating the reference-state string.  That
+    // is the worst possible outcome for this particular function, because
+    // GERG's reference state (h = s = 0 for the IDEAL GAS at 298.15 K /
+    // 101325 Pa) differs from every other CoolProp backend's by a large
+    // offset, so a user reconciling the two would get silence and keep
+    // computing in the old convention.
+    for (const std::string& backend : {std::string("GERG2004"), std::string("GERG2008")}) {
+        const std::string fluid = backend + "::Methane";
+        CHECK_THROWS_AS(CoolProp::set_reference_stateS(fluid, "NBP"), CoolProp::NotImplementedError);
+        // Including for a string that is not a valid reference state at all:
+        // the throw must not depend on the argument being recognisable.
+        CHECK_THROWS_AS(CoolProp::set_reference_stateS(fluid, "NOT_A_REFERENCE_STATE"), CoolProp::NotImplementedError);
+    }
+    // ...and the throw is scoped to GERG: HEOS is untouched.  RESET is used
+    // rather than a real reference state so this test leaves no global
+    // fluid-library offset behind for whatever runs next.
+    CHECK_NOTHROW(CoolProp::set_reference_stateS("HEOS::Methane", "RESET"));
+    CHECK_THROWS_AS(CoolProp::set_reference_stateS("HEOS::Methane", "NOT_A_REFERENCE_STATE"), CoolProp::ValueError);
+}
+
+TEST_CASE("GERG has no acentric factor and says so", "[GERG]") {
+    // GERG publishes none, so EquationOfState::acentric holds the _HUGE
+    // sentinel.  The inherited accessor would return that sentinel verbatim
+    // -- +inf presented as an acentric factor.  Every other strictness rule
+    // in this backend throws rather than answer with a non-GERG number; this
+    // one has to as well, or the "nothing is borrowed" claim has a hole in it
+    // that reads like a value.
+    std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    CHECK_THROWS_AS(AS->acentric_factor(), CoolProp::NotImplementedError);
+    // The keyed/trivial-output route reaches the same override, so it cannot
+    // be used to read the sentinel around the accessor.
+    CHECK_THROWS_AS(AS->trivial_keyed_output(iacentric_factor), CoolProp::NotImplementedError);
+}
+
+TEST_CASE("GERG pins which zero-mole-fraction properties work and which do not", "[GERG]") {
+    // The both-zero guard in GERG2008ReducingFunction fixed the reducing
+    // state and everything downstream of it, which is what makes a full
+    // 21-name natural-gas analysis usable at all.  It did NOT fix the
+    // XN_DEPENDENT composition-derivative branches, which inline the same
+    // 0/0 expression rather than calling the guarded helpers, and those are
+    // what fugacity goes through.  Web/coolprop/GERG.rst states exactly this
+    // split; this test is what stops the documentation drifting away from the
+    // code in either direction.
+    //
+    // If a future change fixes the XN_DEPENDENT branches, the second half of
+    // this test SHOULD start failing -- that is the signal to update
+    // GERG.rst, the changelog, and GitHub #1677 / bd CoolProp-8psx, not to
+    // relax the assertion.
+    const std::vector<std::string> names = {"Methane", "Nitrogen", "Ethane", "Propane"};
+    const std::vector<CoolPropDbl> z_full = {0.9, 0.1, 0.0, 0.0};  // two exact zeros
+    const std::vector<std::string> names_trim = {"Methane", "Nitrogen"};
+    const std::vector<CoolPropDbl> z_trim = {0.9, 0.1};
+
+    // Both backends, because this is a shared-code behaviour and not a GERG
+    // peculiarity: asserting it on HEOS too is what documents that the branch
+    // neither introduced nor GERG-scoped it.
+    for (const std::string& backend : {std::string("GERG2008"), std::string("HEOS")}) {
+        std::shared_ptr<AbstractState> full(AbstractState::factory(backend, names));
+        full->set_mole_fractions(z_full);
+        std::shared_ptr<AbstractState> trim(AbstractState::factory(backend, names_trim));
+        trim->set_mole_fractions(z_trim);
+        for (AbstractState* AS : {full.get(), trim.get()}) {
+            AS->update(PT_INPUTS, 1e6, 300.0);
+        }
+        INFO("backend := " << backend);
+        // WORKS: everything that flows from the reducing state.
+        CHECK(ValidNumber(full->rhomolar()));
+        CHECK_THAT(full->rhomolar(), Catch::Matchers::WithinRel(trim->rhomolar(), 1e-12));
+        CHECK_THAT(full->alphar(), Catch::Matchers::WithinRel(trim->alphar(), 1e-12));
+        CHECK_THAT(full->cvmolar(), Catch::Matchers::WithinRel(trim->cvmolar(), 1e-11));
+        // DOES NOT WORK: the composition derivatives, and therefore fugacity.
+        // Pinned as NaN deliberately -- see the note above.
+        CHECK(!ValidNumber(full->fugacity_coefficient(0)));
+        // The trimmed composition, with no exact zeros, is fine -- which is
+        // what identifies the zeros as the cause rather than the mixture.
+        CHECK(ValidNumber(trim->fugacity_coefficient(0)));
+    }
 }
 
 #endif /* ENABLE_CATCH */
