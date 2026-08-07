@@ -50,6 +50,7 @@
 #include "Backends/Helmholtz/HelmholtzEOSBackend.h"
 #include "Backends/Helmholtz/MixtureParameters.h"
 #include "CoolProp/DataStructures.h"
+#include "CoolProp/FactoryOptions.h"
 #include "Backends/REFPROP/REFPROPMixtureBackend.h"
 #include "Backends/Cubics/CubicsLibrary.h"
 #include "Backends/PCSAFT/PCSAFTLibrary.h"
@@ -960,8 +961,15 @@ double saturation_ancillary(const std::string& fluid_name, const std::string& ou
 /// therefore leaves "GERG2008Backend::Methane" outside the guard, and any
 /// future alias would escape it too.
 static bool is_gerg_backend_string(const std::string& backend) {
+    // parse_factory_options FIRST: AbstractState::factory accepts a
+    // "?<options>" suffix on the backend half ("GERG2008?{...}::Methane"),
+    // and extract_backend splits on "::" BEFORE that suffix is stripped, so
+    // the raw token arriving here still carries it.  Without this,
+    // "GERG2008?::Methane" resolved to no family at all and walked straight
+    // past the guard back into the silent no-op.
+    const std::string clean = parse_factory_options(backend).clean_string;
     backend_families f1 = INVALID_BACKEND_FAMILY, f2 = INVALID_BACKEND_FAMILY;
-    extract_backend_families(backend, f1, f2);
+    extract_backend_families(clean, f1, f2);
     // f2 is checked as well so that a composed string ("<something>&GERG2008")
     // cannot smuggle a GERG state past the guard.
     for (backend_families f : {f1, f2}) {
@@ -1082,6 +1090,14 @@ void set_reference_stateS(const std::string& FluidName, const std::string& refer
     //    INCOMP, ...) still falls off the end of this chain and silently does
     //    nothing.  Making it throw would change behaviour for callers that
     //    have relied on the no-op for years, so it needs its own decision.
+    //    Note this includes the HEOS arm's own literal comparison: the
+    //    registered BACKEND names "HelmholtzEOSBackend" and
+    //    "HelmholtzEOSMixtureBackend" are valid factory spellings that
+    //    `backend == "HEOS"` does not match, so
+    //    set_reference_stateS("HelmholtzEOSBackend::Methane", "NBP") is a
+    //    silent no-op today.  That one is unambiguously a bug rather than a
+    //    preserved legacy behaviour, but fixing it changes HEOS behaviour and
+    //    does not belong in a GERG change.
     //
     // 2. A FluidName with no "::" at all resolves to backend "?" and takes the
     //    HEOS arm above.  That is the documented default and cannot be

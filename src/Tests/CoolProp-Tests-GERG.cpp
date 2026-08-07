@@ -1816,6 +1816,22 @@ TEST_CASE("GERG refuses set_reference_stateS instead of silently ignoring it", "
     // through -- which is exactly what the first version of this guard did.
     CHECK_THROWS_AS(CoolProp::set_reference_stateS("GERG2008Backend::Methane", "NBP"), CoolProp::NotImplementedError);
     CHECK_THROWS_AS(CoolProp::set_reference_stateS("GERG2004Backend::Methane", "NBP"), CoolProp::NotImplementedError);
+    // The "?<options>" factory suffix too.  extract_backend splits on "::"
+    // BEFORE the suffix is stripped, so the raw token reaching the guard still
+    // carries it -- "GERG2008?::Methane" is a working factory string that
+    // resolved to no family at all and slipped past the first version of it.
+    CHECK_THROWS_AS(CoolProp::set_reference_stateS("GERG2008?::Methane", "NBP"), CoolProp::NotImplementedError);
+    // ...and a composed tabular string, whose SECOND half is the GERG family.
+    CHECK_THROWS_AS(CoolProp::set_reference_stateS("BICUBIC&GERG2008::Methane", "NBP"), CoolProp::NotImplementedError);
+    // Non-GERG backends must NOT start throwing: a guard that over-matches
+    // would break set_reference_stateS for everyone else.  Note these two are
+    // currently silent no-ops for a SEPARATE pre-existing reason (they match
+    // no arm of the dispatch chain at all -- bd CoolProp-mh1q); the assertion
+    // here is only that the GERG guard does not claim them.  If mh1q is fixed
+    // so unrecognised prefixes throw, update these two lines rather than the
+    // GERG guard.
+    CHECK_NOTHROW(CoolProp::set_reference_stateS("SRK::Propane", "NBP"));
+    CHECK_NOTHROW(CoolProp::set_reference_stateS("BICUBIC&HEOS::Methane", "NBP"));
 
     // ...and the throw is scoped to GERG: HEOS is untouched.  RESET is the
     // restore idiom, chosen because it zeroes the offset rather than setting

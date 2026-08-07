@@ -345,6 +345,14 @@ library.  Before this was made explicit the call was a **silent no-op** — it
 returned without error and without effect, and did not even validate the
 reference-state string.  See *Reference state* below for what to do instead.
 
+The throw covers every spelling that resolves to a GERG family, including
+``GERG2008Backend::``, ``GERG2008?<options>::`` and composed strings such as
+``BICUBIC&GERG2008::``.  It does **not** cover a bare fluid name with no
+``::`` prefix: ``set_reference_stateS("Methane", "NBP")`` resolves to the
+default backend and adjusts the ``HEOS`` fluid library, which has no effect on
+a GERG state and raises no error.  That is inherent to the string API — the
+name carries no backend information — so always pass the prefix.
+
 The strictness rules are model-level, not C++-level
 ----------------------------------------------------
 

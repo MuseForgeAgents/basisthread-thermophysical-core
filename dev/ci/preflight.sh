@@ -234,10 +234,6 @@ else
     add_tags() {
         local t
         for t in "$@"; do
-            # "$t" is QUOTED inside the pattern: a tag is bracketed
-            # ("[GERG]") and an unquoted expansion is a glob bracket
-            # expression on shells that re-glob it, which would make the
-            # dedupe silently stop working.
             case ",$TAGS," in
                 *",${t},"*) ;;                            # already present
                 *) TAGS="${TAGS:+$TAGS,}$t" ;;
@@ -272,20 +268,29 @@ else
         add_tags "[PropsSI]" "[Helmholtz]"
     fi
     if [ -z "$TAGS" ]; then
-        # No path -> tag arm matched.  This used to fall back to
+        # No path -> tag arm matched.  The old fallback was
         # TAG_FILTER="[!slow][!benchmark]", which in this Catch2 selects ZERO
-        # tests ([!slow] is a hidden-tag SELECTOR, not an exclusion) and so
-        # printed a green "tests" line having run nothing at all.  The correct
-        # exclusion is ~[slow]~[benchmark] — 440 cases — but that sweep has a
-        # known pre-existing failure (VLERoutines.cpp:3211, PT flash two-phase,
-        # 7.196e-10 vs 1e-10), so turning it on here would block every
-        # unrelated push on an unrelated bug.  Reporting SKIP is the honest
-        # middle: it says out loud that this gate did not run, and it shows in
-        # the summary as skipped rather than passed.  Fixing the filter and the
-        # failure together is bd CoolProp-8yrc.
-        skip "tests" "no path->tag arm matched; the default filter is bd CoolProp-8yrc (run ./build_catch/CatchTestRunner '~[slow]~[benchmark]' by hand)"
+        # tests ([!slow] is a hidden-tag SELECTOR, not an exclusion) -- but it
+        # exits 2 while doing so, so the exit-status arm below already turned
+        # it into a hard FAIL.  This arm must therefore also FAIL, not skip:
+        # downgrading it to a skip would let every diff outside the four
+        # mapped areas push with no tests run at all, which is a LOOSER gate
+        # than before.  The right long-term filter is ~[slow]~[benchmark]
+        # (440 cases), blocked on a known pre-existing failure
+        # (VLERoutines.cpp:3211, PT flash two-phase, 7.196e-10 vs 1e-10) --
+        # bd CoolProp-8yrc.  Until then this is loud and blocking, with a
+        # message that says what to run instead.
+        fail "tests (no path->tag arm matched this diff, and the default filter selects zero tests -- bd CoolProp-8yrc. Run: ./build_catch/CatchTestRunner '~[slow]~[benchmark]'  -- or --skip=tests if this diff genuinely needs no test scope)"
     else
-        TAG_FILTER="$TAGS,[!benchmark]"
+        # `~[benchmark]~[!benchmark]` is appended to EVERY term, not once at
+        # the end.  Comma is OR in a Catch2 test spec, so the old trailing
+        # ",[!benchmark]" did not exclude anything -- it SELECTED the hidden
+        # reserved-tag cases and ADDED them to the run (measured: 78 -> 85).
+        # Exclusions have to sit inside each OR term to apply to it.
+        TAG_FILTER=""
+        for tag in ${TAGS//,/ }; do
+            TAG_FILTER="${TAG_FILTER:+$TAG_FILTER,}${tag}~[benchmark]~[!benchmark]"
+        done
         echo "  tag filter: $TAG_FILTER"
         # THREE independent conditions, because each one alone fails open:
         #   - exit status: a runner that segfaults or is OOM-killed prints no
