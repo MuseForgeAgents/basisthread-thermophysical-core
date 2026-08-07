@@ -1630,7 +1630,7 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
         // and QT_flash subtracts only 1e-13 from it.
         const double T = end.T_K * (1 + 1e-9);
         if (!saturation_reachable(*AS, T)) continue;
-        ran_names.push_back(name);
+        ran_names.emplace_back(name);
         REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
         CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoL_molm3, 1e-6));
         // 1e-5 on p, not 1e-6: at the bottom of the fitted range the
