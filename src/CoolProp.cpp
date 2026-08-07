@@ -50,7 +50,6 @@
 #include "Backends/Helmholtz/HelmholtzEOSBackend.h"
 #include "Backends/Helmholtz/MixtureParameters.h"
 #include "CoolProp/DataStructures.h"
-#include "CoolProp/FactoryOptions.h"
 #include "Backends/REFPROP/REFPROPMixtureBackend.h"
 #include "Backends/Cubics/CubicsLibrary.h"
 #include "Backends/PCSAFT/PCSAFTLibrary.h"
@@ -961,13 +960,19 @@ double saturation_ancillary(const std::string& fluid_name, const std::string& ou
 /// therefore leaves "GERG2008Backend::Methane" outside the guard, and any
 /// future alias would escape it too.
 static bool is_gerg_backend_string(const std::string& backend) {
-    // parse_factory_options FIRST: AbstractState::factory accepts a
-    // "?<options>" suffix on the backend half ("GERG2008?{...}::Methane"),
-    // and extract_backend splits on "::" BEFORE that suffix is stripped, so
-    // the raw token arriving here still carries it.  Without this,
-    // "GERG2008?::Methane" resolved to no family at all and walked straight
-    // past the guard back into the silent no-op.
-    const std::string clean = parse_factory_options(backend).clean_string;
+    // Strip the "?<options>" suffix FIRST: AbstractState::factory accepts one
+    // on the backend half ("GERG2008?{...}::Methane"), and extract_backend
+    // splits on "::" BEFORE that suffix is stripped, so the raw token
+    // arriving here still carries it.  Without this, "GERG2008?::Methane"
+    // resolved to no family at all and walked straight past the guard back
+    // into the silent no-op.
+    //
+    // A plain substr, NOT parse_factory_options: that function is not a pure
+    // parser -- a "?@<path>" tail makes it READ A FILE, so it can throw
+    // ValueError or even a bare int (errno) out of what is documented here as
+    // a classification predicate, for backend strings that are not GERG at
+    // all.  Only the text before the first '?' is needed to name the family.
+    const std::string clean = backend.substr(0, backend.find('?'));
     backend_families f1 = INVALID_BACKEND_FAMILY, f2 = INVALID_BACKEND_FAMILY;
     extract_backend_families(clean, f1, f2);
     // f2 is checked as well so that a composed string ("<something>&GERG2008")
@@ -1095,9 +1100,11 @@ void set_reference_stateS(const std::string& FluidName, const std::string& refer
     //    "HelmholtzEOSMixtureBackend" are valid factory spellings that
     //    `backend == "HEOS"` does not match, so
     //    set_reference_stateS("HelmholtzEOSBackend::Methane", "NBP") is a
-    //    silent no-op today.  That one is unambiguously a bug rather than a
-    //    preserved legacy behaviour, but fixing it changes HEOS behaviour and
-    //    does not belong in a GERG change.
+    //    silent no-op today, as is the "?<options>" spelling
+    //    ("HEOS?::Water"), for the same reason: the HEOS arm compares the raw
+    //    prefix literally.  Those are unambiguously bugs rather than
+    //    preserved legacy behaviour, but fixing them changes HEOS behaviour
+    //    and does not belong in a GERG change.
     //
     // 2. A FluidName with no "::" at all resolves to backend "?" and takes the
     //    HEOS arm above.  That is the documented default and cannot be
