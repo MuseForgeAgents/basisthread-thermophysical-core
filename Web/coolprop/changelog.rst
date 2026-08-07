@@ -1,6 +1,42 @@
 Changelog for CoolProp
 ======================
 
+8.0.1
+-----
+
+Highlights:
+
+* Added the :doc:`GERG-2004 and GERG-2008 </coolprop/GERG>` wide-range equations of state for natural gases as two new *strict* backend families (``GERG2004::...``, ``GERG2008::...``).  Strict means the backends admit only the 18 / 21 components each model publishes, carry only that model's own pure-fluid EOS, ideal-gas coefficients, binary reducing parameters and departure functions, use GERG's ``R = 8.314472 J/mol/K`` rather than the CODATA value, and throw rather than answer from a different model — transport properties, superancillaries, and mutable binary interaction parameters are all deliberately unavailable.  Validated against `teqp <https://github.com/usnistgov/teqp>`_ at relative tolerances of 1e-9 to 1e-10.  See the :doc:`GERG documentation </coolprop/GERG>` for the component tables, the enforced range of validity, the reference-state convention (``h = s = 0`` for the **ideal gas** at 298.15 K / 101325 Pa, which differs from every other CoolProp backend), and the known limitations — notably that mixture saturation, phase envelopes and VLE flashes do not yet work on the GERG backends.
+
+**Behavior changes (potentially breaking):**
+
+* **Compositions with two or more exactly-zero mole fractions no longer return
+  NaN.**  ``GERG2008ReducingFunction::f_Y_ij`` evaluates
+  :math:`x_i x_j (x_i + x_j) / (\beta^2 x_i + x_j)`, which is :math:`0/0` as
+  soon as *two* mole fractions are exactly zero.  Any such composition
+  previously produced a NaN reducing temperature and density — and therefore
+  NaN for every property — **with no error raised anywhere**.  This affected
+  **all** multi-fluid backends, including the default ``HEOS``, and is exactly
+  the shape a natural-gas analysis arrives in (a full component list with most
+  entries zero).  The removable singularity is now guarded at the both-zero
+  corner, which is its correct limit of zero.  Users who previously got a
+  silent NaN will now get correct values, identical to the same composition
+  with the zero-mole-fraction components trimmed away.  A *single* zero mole
+  fraction was never affected and its infinite-dilution behaviour is bit-for-bit
+  unchanged.  See GitHub
+  `#1677 <https://github.com/CoolProp/CoolProp/issues/1677>`_.
+
+* **ABI break for pre-built shared libraries:**
+  ``HelmholtzEOSMixtureBackend::set_mixture_parameters()`` is now ``virtual``,
+  so the GERG backends can populate the reducing function and excess term from
+  their own tables instead of CoolProp's global JSON library.  Adding a virtual
+  member function changes the class's vtable layout.  This is **source**
+  compatible — no caller needs to change — but it is **not binary** compatible:
+  code compiled against an 8.0.0 header and linked against an 8.0.1
+  ``libCoolProp`` (or vice versa) must be recompiled.  This affects anyone
+  linking a pre-built CoolProp shared library, whether or not they use the GERG
+  backends.
+
 8.0.0
 -----
 
