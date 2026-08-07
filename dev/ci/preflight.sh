@@ -348,7 +348,30 @@ else
         # without having to open the log.
         elif ./build_catch/CatchTestRunner "$TAG_FILTER" \
                  --warn UnmatchedTestSpec 2>&1 | tee "$test_log" >/dev/null; then
-            ok "tests ($TAG_FILTER, $matched cases listed)"
+            # THIRD condition, and it is not redundant with the two above.
+            # `matched` counts cases the filter SELECTED; it says nothing about
+            # whether any of them ran an assertion.  Catch2's SKIP() makes
+            # "matched but vacuous" reachable, and in that state the runner
+            # prints "assertions:  0 |  0 skipped" and exits 0 -- so both the
+            # count check and the exit-code check pass and the gate would
+            # report success having verified NOTHING.
+            #
+            # This is not hypothetical.  Measured on this repo:
+            #   $ ./build_catch/CatchTestRunner "[REFPROP]" --warn UnmatchedTestSpec
+            #   test cases: 14 | 2 passed | 12 skipped
+            #   assertions:  0 |  0 skipped        <-- exit 0, 14 cases listed
+            # Every [refprop] case SKIPs unless COOLPROP_REFPROP_ROOT points at
+            # an installed REFPROP, which is exactly the configuration CI and a
+            # fresh dev machine are in.
+            #
+            # Require a POSITIVE assertion count: `[1-9]` on both patterns, so
+            # "All tests passed (0 assertions...)" cannot satisfy it either.
+            if grep -qE "^(All tests passed \([1-9]|assertions:[[:space:]]*[1-9])" "$test_log"; then
+                ok "tests ($TAG_FILTER, $matched cases listed)"
+            else
+                tail -15 "$test_log" || true
+                fail "tests (filter '$TAG_FILTER' selected $matched case(s) but ran ZERO assertions -- every case skipped. Green here would mean nothing was checked; see $test_log)"
+            fi
         else
             # `|| true` guards the DISPLAY only: without it a tail failure
             # would abort the script under `set -e` before `fail` records the

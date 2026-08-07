@@ -99,6 +99,9 @@ excess term from GERG tables instead of the global JSON library.
 to existing CoolProp code beyond backend registration."  That is no longer
 true.  As shipped, the branch also modifies:
 
+- `src/Backends/Helmholtz/HelmholtzEOSMixtureBackend.h` — `set_mixture_parameters()`
+  made `virtual` (the change described immediately above; listed here so this
+  enumeration is genuinely exhaustive),
 - `src/Backends/Helmholtz/ReducingFunctions.cpp` — the removable-singularity
   guard in `GERG2008ReducingFunction::f_Y_ij` and its two first-derivative
   helpers (a shared fix affecting default `HEOS` too; GitHub #1677),
@@ -106,6 +109,9 @@ true.  As shipped, the branch also modifies:
   `set_reference_stateS` refusal,
 - `src/DataStructures.cpp` / `include/CoolProp/DataStructures.h` — the new
   `backend_families` and `backends` enumerators.
+
+Outside `src/`, the branch also touches `CMakeLists.txt`, `dev/ci/preflight.sh`,
+`CoolPropBibTeXLibrary.bib` and the `Web/` documentation.
 
 ### Data header layout
 

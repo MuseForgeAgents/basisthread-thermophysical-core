@@ -1605,17 +1605,23 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
     // GERG's own VLE at that temperature must reproduce them -- which checks
     // the traced values, the ancillary fit at the very bottom of its range
     // (its worst-conditioned end), and the units of the stored p all at once.
-    // The `continue` below MUST be counted. Three of these six fluids --
-    // methane (end state 57.17 K), nitrogen (37.86 K) and argon (45.24 K) --
-    // have a traced end state BELOW the enforced Tmin of 60 K, so they skip
-    // today and assert nothing. Without the exact count at the end of this
-    // case, widening the range guard (e.g. GERGBackend.cpp's per-component
-    // `min(60, Tc)` becoming a flat 60.0) would make ALL SIX skip and this
-    // TEST_CASE -- the only GERG saturation test with an external
-    // teqp-traced reference -- would still report green while checking
-    // nothing. Every other sweep in this file already pins its counter;
-    // this one did not.
-    int ran = 0;
+    // The `continue` below MUST be accounted for. Three of these six fluids --
+    // methane (traced end state 57.169 K), nitrogen (37.858 K) and argon
+    // (45.237 K) -- sit BELOW the enforced Tmin of 60 K, so they skip today
+    // and assert nothing. The three that do run are ethane (91.60 K),
+    // n-butane (127.73 K) and water (239.96 K).
+    //
+    // Without this bookkeeping, raising the enforced lower temperature limit
+    // would silently shrink the sweep while the TEST_CASE still reported
+    // green -- and this is the ONLY GERG saturation test with an external
+    // teqp-traced reference, so it is the worst one to lose quietly. Above
+    // 91.60 K ethane drops out; above 239.96 K all six do and the case would
+    // verify nothing at all.
+    //
+    // Names, not just a count: an exact count alone still passes if one
+    // reachable fluid is swapped for one unreachable one, which is precisely
+    // the "changes in either direction" this pin is supposed to catch.
+    std::vector<std::string> ran_names;
     for (const auto& name : {"Methane", "Nitrogen", "Ethane", "n-Butane", "Water", "Argon"}) {
         CAPTURE(name);
         std::shared_ptr<AbstractState> AS(AbstractState::factory("GERG2008", std::vector<std::string>{name}));
@@ -1624,7 +1630,7 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
         // and QT_flash subtracts only 1e-13 from it.
         const double T = end.T_K * (1 + 1e-9);
         if (!saturation_reachable(*AS, T)) continue;
-        ++ran;
+        ran_names.push_back(name);
         REQUIRE_NOTHROW(AS->update(QT_INPUTS, 0.0, T));
         CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoL_molm3, 1e-6));
         // 1e-5 on p, not 1e-6: at the bottom of the fitted range the
@@ -1637,10 +1643,8 @@ TEST_CASE("GERG saturation end state agrees with the traced VLE point", "[GERG]"
         AS->update(QT_INPUTS, 1.0, T);
         CHECK_THAT(AS->rhomolar(), Catch::Matchers::WithinRel(end.rhoV_molm3, 1e-6));
     }
-    // Exact, not >=: Ethane, n-Butane and Water are the three whose traced end
-    // state sits above the enforced Tmin. If that set changes in either
-    // direction, this case must be revisited rather than silently re-scoped.
-    REQUIRE(ran == 3);
+    // Exact set, not a count: see the note at the top of this case.
+    REQUIRE(ran_names == std::vector<std::string>{"Ethane", "n-Butane", "Water"});
 }
 
 TEST_CASE("GERG saturation is independent of the ancillary seed", "[GERG]") {
@@ -1919,3 +1923,53 @@ TEST_CASE("GERG pins which zero-mole-fraction properties work and which do not",
 }
 
 #endif /* ENABLE_CATCH */
+
+TEST_CASE("GERG pins which pure-fluid input pairs work and which do not", "[GERG]") {
+    // Web/coolprop/GERG.rst has a section "Which input pairs actually work"
+    // asserting that HmolarP/PSmolar/PUmolar do NOT work on a PURE GERG fluid.
+    // Nothing mechanically linked that claim to the code, so whoever fixes the
+    // acentric-factor seeding would leave the documentation asserting a
+    // limitation that no longer exists, with nothing failing. This case is that
+    // link: when the underlying issue is fixed, THIS TEST FAILS and points at
+    // the doc section to update.
+    //
+    // Root cause: GERG publishes no acentric factor, so EOS.acentric holds the
+    // _HUGE sentinel. solver_rho_Tp seeds from solver_rho_Tp_SRK, which reads
+    // EOS.acentric DIRECTLY -- the throwing calc_acentric_factor override never
+    // intercepts it -- and the guess collapses to the ideal-gas density at the
+    // bracket's low-T end. DmolarP fails by a different route, the
+    // NotImplementedError out of T_DP_PengRobinson.
+    std::shared_ptr<AbstractState> ref(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"}));
+    const double p = 1e6, T = 300.0;
+    REQUIRE_NOTHROW(ref->update(PT_INPUTS, p, T));
+    const double h = ref->hmolar(), s = ref->smolar(), u = ref->umolar();
+
+    // PT is the reference point and must keep working -- otherwise the three
+    // CHECK_THROWS below could "pass" simply because the fluid is broken.
+    CHECK(ValidNumber(h));
+
+    auto fresh = [] { return std::shared_ptr<AbstractState>(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane"})); };
+    CHECK_THROWS(fresh()->update(HmolarP_INPUTS, h, p));
+    CHECK_THROWS(fresh()->update(PSmolar_INPUTS, p, s));
+    CHECK_THROWS(fresh()->update(PUmolar_INPUTS, p, u));
+
+    // Through PropsSI the same failure degrades to _HUGE plus an errstring
+    // rather than an exception, which is the user-visible shape and the reason
+    // the docs call it out. Pinned so that a change in THAT behaviour is also
+    // caught.
+    const double h_hi = CoolProp::PropsSI("Hmolar", "P", p, "T", T, "GERG2008::Methane");
+    CHECK(ValidNumber(h_hi));
+    CHECK_FALSE(ValidNumber(CoolProp::PropsSI("T", "P", p, "Hmolar", h_hi, "GERG2008::Methane")));
+
+    // The same flash on a GERG MIXTURE succeeds -- this is specific to pure
+    // fluids, and the doc says so. If this ever starts throwing, the doc's
+    // "pure fluids only" framing is wrong.
+    std::shared_ptr<AbstractState> mix(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane", "Ethane"}));
+    mix->set_mole_fractions(std::vector<CoolPropDbl>{0.9, 0.1});
+    REQUIRE_NOTHROW(mix->update(PT_INPUTS, p, T));
+    const double h_mix = mix->hmolar();
+    std::shared_ptr<AbstractState> mix2(AbstractState::factory("GERG2008", std::vector<std::string>{"Methane", "Ethane"}));
+    mix2->set_mole_fractions(std::vector<CoolPropDbl>{0.9, 0.1});
+    CHECK_NOTHROW(mix2->update(HmolarP_INPUTS, h_mix, p));
+    CHECK_THAT(mix2->T(), Catch::Matchers::WithinRel(T, 1e-6));
+}
