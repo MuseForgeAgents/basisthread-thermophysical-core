@@ -547,16 +547,32 @@ CoolPropDbl GERG2008ReducingFunction::d3Yrdxidxjdxk(const std::vector<CoolPropDb
     }
 }
 
-/// True when BOTH mole fractions of a pair are exactly zero -- the one input
-/// for which f_Y_ij and its first derivatives evaluate 0/0.
+/// True when BOTH mole fractions of a pair are exactly zero -- the input for
+/// which f_Y_ij and its first derivatives evaluate 0/0 for any PHYSICALLY
+/// VALID composition.
 ///
-/// EXACTLY zero is the whole condition, not an epsilon: f_Y_ij's denominator
-/// is beta^2*x_i + x_j, which is nonzero for any pair of non-zero doubles,
-/// however small (x_i = x_j = 1e-200 gives a numerator that underflows to 0
-/// and a denominator near 2e-200, i.e. a clean 0). So the both-exactly-zero
-/// corner is the complete set of inputs that produce a NaN here, and a
-/// tolerance-based test would instead start rewriting answers that are
-/// currently correct. See GitHub #1677 / bd CoolProp-8psx.
+/// EXACTLY zero is the whole condition, not an epsilon.  For non-negative
+/// mole fractions the denominator beta^2*x_i + x_j is a sum of non-negative
+/// terms and is therefore nonzero for any pair of non-zero doubles, however
+/// small: x_i = x_j = 1e-200 gives a numerator that underflows to 0 over a
+/// denominator near 2e-200, i.e. a clean 0.  A tolerance-based test would
+/// instead start rewriting answers that are currently correct.
+///
+/// SCOPE OF THAT CLAIM, stated precisely because an earlier version of this
+/// comment overstated it.  Restricted to non-negative mole fractions, the
+/// both-exactly-zero corner is the complete set of NaN-producing inputs here,
+/// so guarding it replaces NaN with the correct limit and changes no finite
+/// result.  It is NOT the complete set over arbitrary doubles: with
+/// beta == 1 and x_i == -x_j the denominator cancels to exactly zero while
+/// both mole fractions are nonzero, and f_Y_ij is 0/0 there too; nearby
+/// (near-cancelling) inputs are worse still, returning finite but absurd
+/// reducing parameters (measured: Tr = 2.79e-08 K, rhor = -6.2e13 mol/m^3)
+/// with no error raised.  That cancelling corner is a SEPARATE pre-existing
+/// defect which this guard neither introduces nor fixes -- the unguarded code
+/// was equally NaN there -- and it is unreachable from a valid composition.
+/// It is recorded on bd CoolProp-8psx rather than papered over here.
+///
+/// See GitHub #1677 / bd CoolProp-8psx.
 static inline bool both_mole_fractions_zero(double xi, double xj) {
     return xi == 0.0 && xj == 0.0;
 }
@@ -599,8 +615,11 @@ CoolPropDbl GERG2008ReducingFunction::f_Y_ij(const std::vector<CoolPropDbl>& x, 
     // introduced: GitHub #1677 / bd CoolProp-8psx, whose design of record is
     // exactly this -- guard the both-zero corner at the math source and keep
     // every component, so that single-zero infinite-dilution derivatives stay
-    // exact.  This is a NaN-ONLY change: there is no input for which it
-    // replaces one finite value with a different finite value.
+    // exact.  For any physically valid composition this is a NaN-ONLY change:
+    // over non-negative mole fractions there is no input for which it replaces
+    // one finite value with a different finite value.  See
+    // both_mole_fractions_zero above for why that qualifier is there and for
+    // the separate, pre-existing cancelling-denominator corner it excludes.
     if (both_mole_fractions_zero(xi, xj)) {
         return 0.0;
     }

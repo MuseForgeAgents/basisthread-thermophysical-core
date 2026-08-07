@@ -8,23 +8,42 @@ one-off, by-hand tools you re-run after touching the GERG tables or after a
 
 ## `verify_transcription.py` — table-family cross-check (Tasks 1-6)
 
-Mechanically re-verifies all four coefficient-table families
+Mechanically re-verifies all five coefficient-table families
 (pure-fluid residual coefficients, ideal-gas coefficients, binary
-reducing parameters, departure functions/F_ij) transcribed into
-`src/Backends/GERG/GERGData.h` / `GERGBackend.cpp` against a local `teqp`
-checkout's `include/teqp/models/GERG/GERG.hpp`. It parses both sources with
-regexes (no build/link against teqp — that would pull Eigen/Boost/autodiff
-into a lookup-table sanity check) and diffs every extracted value.
+reducing parameters, departure functions/F_ij, pure-fluid reducing/critical
+parameters) transcribed into `src/Backends/GERG/GERGData.h` /
+`GERGBackend.cpp` against a local `teqp` checkout's
+`include/teqp/models/GERG/GERG.hpp`. It parses both sources with regexes (no
+build/link against teqp — that would pull Eigen/Boost/autodiff into a
+lookup-table sanity check) and diffs every extracted value.
 
 ```bash
 python3 dev/gerg/verify_transcription.py                      # ~/Code/teqp by default
 python3 dev/gerg/verify_transcription.py --teqp-root /path/to/teqp
 ```
 
-Exits 0 and prints "OK" for each of the four families on success; exits 1
+Exits 0 and prints "OK" for each of the five families on success; exits 1
 with a diff-shaped mismatch report otherwise. Run this after editing any
 table in `GERGData.h`/`GERGBackend.cpp` — a typo fix, a new fluid, a value
 correction.
+
+The fifth family, `pure_info` (Table A3.5's tabulated `Tc_K`, `rhoc_molm3`,
+`M_kgmol`, i.e. `detail::pure_info_2004()` / `detail::pure_info_2008_overrides()`
+in `GERGData.h`), was added after the other four and checked in the same
+style: exact row counts asserted (18 GERG-2004, 5 GERG-2008 overrides) so a
+dropped row fails loudly, and every row compared both as a parsed float
+(`vec_close`, `1e-13` relative) and as a normalised raw literal token —
+the raw-token compare catches a transcription slip a tolerance-based float
+compare can paper over. It compares the RAW table literals (mol/dm^3, K,
+kg/kmol) as written in source, not `get_pure_info()`'s converted output
+(mol/m^3, kg/mol): both sides apply the identical `*1000`/`/1000`
+conversion, so comparing pre-conversion literals against pre-conversion
+literals is the actual transcription check, while comparing post-conversion
+output would just re-verify that arithmetic against itself. Verified to
+discriminate: corrupting one digit of methane's tabulated `Tc_K` in
+`GERGData.h` makes the script exit 1 and name `methane` in both the
+float-close and raw-literal mismatch lines; restoring it returns to exit 0
+with no diff.
 
 ## `generate_reference_values.py` — EOS-level reference values (Task 7)
 

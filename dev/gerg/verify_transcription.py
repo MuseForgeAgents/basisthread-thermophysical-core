@@ -20,6 +20,10 @@ checks can be re-run today, and any future edit to these tables (a typo fix,
 a new fluid, a value correction) has no mechanical check to fall back on.
 This script re-implements all four of those checks -- ONE script, covering
 ALL FOUR coefficient-table families -- and commits it so it stays runnable.
+A fifth family, pure_info (Table A3.5's tabulated Tc/rhoc/M), was added
+later: it was checked once by hand (against teqp GERG.hpp:431-465/973-997)
+but that check only ever existed in a review transcript, so it is re-done
+here mechanically like the other four.
 
 It re-extracts each table family directly from teqp's GERG.hpp with regexes
 (not by building/linking against teqp, which would pull in Eigen/Boost/
@@ -40,6 +44,13 @@ Families checked:
      rows, 72 GERG-2008 override/addition rows.
   4. Departure functions and F_ij (Table A3.6) -- 15 pairs with a departure
      function, 7 of them scaled by F_ij != 1.
+  5. Pure-fluid reducing/critical parameters (Table A3.5) -- 18 GERG-2004
+     rows, 5 GERG-2008 override/addition rows. Compares the raw pre-conversion
+     table literals (mol/dm^3, K, kg/kmol) in both teqp's data_map and
+     CoolProp's pure_info_2004()/pure_info_2008_overrides(), by parsed float
+     value AND by normalised raw literal token (a tolerance-based float
+     compare alone can miss a transcription error that a raw-token compare
+     catches).
 
 Exits 0 and prints "OK" for every family on success; exits 1 and prints a
 diff-shaped mismatch report on any discrepancy.
@@ -595,6 +606,109 @@ def check_departure(teqp_text, coolprop_text):
           f"(distinct row shapes: {len(teqp_distinct)}) -- all match, pair-keyed. OK")
 
 
+# ---------------------------------------------------------------------------
+# Family 5: pure-fluid reducing/critical parameters (Table A3.5)
+# ---------------------------------------------------------------------------
+
+PURE_INFO_ROW_RE = re.compile(r'\{"([a-z0-9\-]+)"\s*,\s*\{([^{}]*)\}\}')
+
+
+def parse_pure_info_rows(blob):
+    """name -> (raw literal tokens, parsed floats), both length-3
+    (rhoc_molm3, Tc_K, M_kgmol) in that order -- teqp's PureInfo brace-init
+    order and CoolProp's PureInfo field order match, so no reordering is
+    needed here (unlike BetasGammas' betaV/gammaV/betaT/gammaT)."""
+    rows = {}
+    for name, valstr in PURE_INFO_ROW_RE.findall(blob):
+        raw = [v.strip() for v in valstr.split(",") if v.strip() != ""]
+        require(len(raw) == 3, f"{name}: pure_info row does not have 3 values: {valstr!r}")
+        rows[name] = (tuple(raw), tuple(parse_floats(valstr)))
+    return rows
+
+
+def _norm_literal(tok):
+    """Formatting-insensitive normalisation of a numeric literal TOKEN, for a
+    raw-token compare that still tolerates pure formatting (unary '+',
+    trailing zeros) without being a second float parse. Deliberately
+    narrower than parse_floats/close(): it exists because a tolerance-based
+    float compare can silently accept a transcription slip that changes the
+    literal but not the parsed value enough to trip `close()`'s tolerance --
+    e.g. a truncated digit inside a long mantissa. Comparing the normalised
+    tokens as well as the parsed floats catches that class of error; two
+    literals that mean the same number after this normalisation (e.g.
+    "1.00000000" and "1.000000000") are treated as equivalent, not as a
+    mismatch, since only the trailing-zero formatting differs.
+    """
+    t = tok.strip()
+    if t.startswith("+"):
+        t = t[1:]
+    if "." in t and "e" not in t and "E" not in t:
+        t = t.rstrip("0")
+        if t.endswith("."):
+            t += "0"
+    return t
+
+
+def check_pure_info(teqp_text, coolprop_data_h_text):
+    print("== Family 5: pure-fluid reducing/critical parameters (Table A3.5) ==")
+
+    # UNITS: this compares the RAW TABLE LITERALS as they appear in source --
+    # mol/dm^3 for rhoc, K for Tc, kg/kmol for M -- i.e. BEFORE the
+    # mol/m^3 / kg/mol conversion that get_pure_info() applies on the way out
+    # (GERGData.h's pure_info_2004()/pure_info_2008_overrides() are the
+    # pre-conversion tables; GERGData.h::get_pure_info() does `*= 1000` /
+    # `/= 1000` afterwards, and teqp's get_pure_info does the identical
+    # conversion). Comparing pre-conversion literals on both sides is "like
+    # with like"; running either side's post-conversion accessor would only
+    # re-verify the same *1000/1000 arithmetic against itself, not the
+    # transcription of the tabulated values.
+    teqp_start_anchor = "static std::map<std::string, PureInfo> data_map = {"
+    teqp_2004_blob = bounded(teqp_text, teqp_start_anchor, "\n    };\n    if (data_map.find(name) == data_map.end())",
+                              "teqp GERG2004 pure_info data_map")
+    second_start = teqp_text.find(teqp_start_anchor, teqp_text.find(teqp_start_anchor) + 1)
+    require(second_start >= 0, "could not find second (GERG2008) pure_info data_map block in teqp")
+    teqp_2008_blob = bounded(teqp_text[second_start:], teqp_start_anchor, "\n    };\n    if (data_map.find(name) != data_map.end())",
+                              "teqp GERG2008 pure_info data_map")
+
+    cp_2004_blob = bounded(coolprop_data_h_text, "pure_info_2004() {\n    static const std::map<std::string, PureInfo> data = {",
+                            "};\n    return data;", "CoolProp pure_info_2004")
+    cp_2008_blob = bounded(coolprop_data_h_text, "pure_info_2008_overrides() {\n    static const std::map<std::string, PureInfo> data = {",
+                            "};\n    return data;", "CoolProp pure_info_2008_overrides")
+
+    teqp_2004 = parse_pure_info_rows(teqp_2004_blob)
+    teqp_2008 = parse_pure_info_rows(teqp_2008_blob)
+    cp_2004 = parse_pure_info_rows(cp_2004_blob)
+    cp_2008 = parse_pure_info_rows(cp_2008_blob)
+
+    require(len(teqp_2004) == 18, f"teqp GERG-2004 pure_info row count is {len(teqp_2004)}, expected 18")
+    require(len(teqp_2008) == 5, f"teqp GERG-2008 pure_info override row count is {len(teqp_2008)}, expected 5")
+    require(len(cp_2004) == 18, f"CoolProp GERG-2004 pure_info row count is {len(cp_2004)}, expected 18")
+    require(len(cp_2008) == 5, f"CoolProp GERG-2008 pure_info override row count is {len(cp_2008)}, expected 5")
+
+    mismatches = []
+
+    def compare(model_label, teqp_rows, cp_rows):
+        for name, (traw, tvals) in teqp_rows.items():
+            entry = cp_rows.get(name)
+            if entry is None:
+                mismatches.append(f"{model_label} {name}: present in teqp, missing in CoolProp")
+                continue
+            craw, cvals = entry
+            if not vec_close(tvals, cvals):
+                mismatches.append(f"{model_label} {name}: teqp {tvals} != CoolProp {cvals}")
+            if tuple(_norm_literal(v) for v in traw) != tuple(_norm_literal(v) for v in craw):
+                mismatches.append(f"{model_label} {name}: raw literal mismatch teqp {traw} != CoolProp {craw}")
+        for name in cp_rows:
+            if name not in teqp_rows:
+                mismatches.append(f"{model_label} {name}: present in CoolProp, missing in teqp")
+
+    compare("2004", teqp_2004, cp_2004)
+    compare("2008-override", teqp_2008, cp_2008)
+
+    require(not mismatches, "pure_info mismatches:\n  " + "\n  ".join(mismatches))
+    print(f"  2004 rows: {len(teqp_2004)}, 2008-override rows: {len(teqp_2008)} -- all match (float + raw-literal). OK")
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--teqp-root", default=os.path.expanduser("~/Code/teqp"), help="Path to a teqp checkout (default: ~/Code/teqp)")
@@ -618,8 +732,9 @@ def main():
     check_ideal_gas(teqp_text, coolprop_text, names_2004, names_2008)
     check_reducing_parameters(teqp_text, coolprop_text)
     check_departure(teqp_text, coolprop_text)
+    check_pure_info(teqp_text, coolprop_data_h_text)
 
-    print("\nAll four table families verified against teqp. OK")
+    print("\nAll five table families verified against teqp. OK")
 
 
 if __name__ == "__main__":
