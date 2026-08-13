@@ -130,18 +130,27 @@ std::filesystem::path make_temp_sibling(const std::filesystem::path& target) {
 }
 
 #if defined(__ISWINDOWS__)
-// Windows-only replace-rename with a small bounded retry for transient
-// same-target contention (CoolProp-4no.2): std::filesystem::rename on
-// Windows was observed to surface ERROR_ACCESS_DENIED as an escaping
-// exception when several threads race MoveFileExW-replace onto the same
-// destination path ("write_bytes_atomic is race-safe across threads",
-// CoolProp-Tests-SVDSBTL.cpp) — a real Win32/NTFS behavior with no POSIX
-// analogue, not a bug in the caller's usage. Calling MoveFileExW directly
-// (rather than through std::filesystem::rename) lets us retry only the
-// two error codes Microsoft documents as "another handle is momentarily
-// using this path" (ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION) instead
-// of swallowing every access-denied outcome, so a genuine persistent
-// permission failure still surfaces after the retry budget is spent.
+// Windows-only replace-rename with a small bounded retry (CoolProp-4no.2):
+// std::filesystem::rename on Windows was observed to surface
+// ERROR_ACCESS_DENIED as an escaping exception when several threads race
+// MoveFileExW-replace onto the same destination path ("write_bytes_atomic
+// is race-safe across threads", CoolProp-Tests-SVDSBTL.cpp) — a real
+// Win32/NTFS behavior with no POSIX analogue, not a bug in the caller's
+// usage. Calling MoveFileExW directly (rather than through
+// std::filesystem::rename) lets us retry only two error codes, on
+// different grounds for each: ERROR_SHARING_VIOLATION is Microsoft's
+// documented signature for a conflicting file-sharing/open-handle
+// condition; ERROR_ACCESS_DENIED was empirically observed during exactly
+// this concurrent same-target replacement race on this environment, but
+// can also represent a persistent permission/security condition — it is
+// retried anyway because the retry is narrowly scoped and bounded, and
+// still surfaces (via the throw below) once the budget is spent. Neither
+// code is swallowed outright, and no other error is retried at all.
+//
+// MOVEFILE_WRITE_THROUGH is passed as a conservative move flag; Microsoft
+// documents its flush guarantee specifically for moves performed as
+// copy/delete operations, so it is not relied on here as proof of
+// durability for every same-volume rename.
 void windows_replace_rename(const std::filesystem::path& temp, const std::filesystem::path& target) {
     constexpr int kMaxAttempts = 8;
     constexpr auto kInitialBackoff = std::chrono::microseconds(500);
@@ -154,7 +163,7 @@ void windows_replace_rename(const std::filesystem::path& temp, const std::filesy
         }
         last_err = GetLastError();
         if (last_err != ERROR_ACCESS_DENIED && last_err != ERROR_SHARING_VIOLATION) {
-            break;  // not a transient-contention signature; fail immediately
+            break;  // not one of the two retried codes; fail immediately
         }
         if (attempt + 1 < kMaxAttempts) {
             std::this_thread::sleep_for(backoff);

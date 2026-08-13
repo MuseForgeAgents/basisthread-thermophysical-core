@@ -17,16 +17,29 @@
 /// replaces `target` with it. On POSIX this is `std::filesystem::rename`
 /// (atomic on a same-filesystem rename). On Windows this calls
 /// `MoveFileExW` directly with `MOVEFILE_REPLACE_EXISTING |
-/// MOVEFILE_WRITE_THROUGH`, retrying a small bounded number of times on
-/// `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` — the documented
-/// Win32 signatures of transient contention when several threads race a
-/// rename onto the same destination (`std::filesystem::rename` alone was
-/// observed to surface exactly this as an escaping exception under that
-/// race — CoolProp-4no.2). Either way, concurrent writers in different
-/// processes / threads either see the previous complete file or one
-/// complete writer's payload — never a partial-write file on the visible
-/// path. A persistent failure (any other error, or the same error after
-/// the Windows retry budget is exhausted) is still reported as a thrown
+/// MOVEFILE_WRITE_THROUGH`. The latter is retained as a conservative move
+/// flag, not as proof of filesystem durability for every same-volume
+/// rename — Microsoft specifically documents its flush guarantee for
+/// moves performed as copy/delete operations.
+///
+/// The Windows path retries a small bounded number of times on two error
+/// codes, treated differently:
+/// - `ERROR_SHARING_VIOLATION`: Microsoft's documented signature for a
+///   conflicting file-sharing / open-handle condition.
+/// - `ERROR_ACCESS_DENIED`: empirically observed during this exact
+///   concurrent same-target replacement race on this Windows environment
+///   (`std::filesystem::rename` alone was seen to surface it as an
+///   escaping exception under that race — CoolProp-4no.2), but it can
+///   also represent a persistent permission/security condition. Retrying
+///   it is acceptable here because the retries are narrowly scoped and
+///   bounded, and the error still propagates once the retry budget is
+///   exhausted.
+///
+/// Either way, concurrent writers in different processes / threads
+/// either see the previous complete file or one complete writer's
+/// payload — never a partial-write file on the visible path. A
+/// persistent failure (any other error, or the same error after the
+/// Windows retry budget is exhausted) is still reported as a thrown
 /// exception, below.
 ///
 /// The temp-path suffix combines a process-unique 64-bit salt (drawn
