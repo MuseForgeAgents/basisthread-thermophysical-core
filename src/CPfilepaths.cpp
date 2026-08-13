@@ -8,11 +8,13 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <filesystem>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <system_error>
+#include <thread>
 
 // This will kill the horrible min and max macros
 #ifndef NOMINMAX
@@ -127,6 +129,45 @@ std::filesystem::path make_temp_sibling(const std::filesystem::path& target) {
     return temp;
 }
 
+#if defined(__ISWINDOWS__)
+// Windows-only replace-rename with a small bounded retry for transient
+// same-target contention (CoolProp-4no.2): std::filesystem::rename on
+// Windows was observed to surface ERROR_ACCESS_DENIED as an escaping
+// exception when several threads race MoveFileExW-replace onto the same
+// destination path ("write_bytes_atomic is race-safe across threads",
+// CoolProp-Tests-SVDSBTL.cpp) — a real Win32/NTFS behavior with no POSIX
+// analogue, not a bug in the caller's usage. Calling MoveFileExW directly
+// (rather than through std::filesystem::rename) lets us retry only the
+// two error codes Microsoft documents as "another handle is momentarily
+// using this path" (ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION) instead
+// of swallowing every access-denied outcome, so a genuine persistent
+// permission failure still surfaces after the retry budget is spent.
+void windows_replace_rename(const std::filesystem::path& temp, const std::filesystem::path& target) {
+    constexpr int kMaxAttempts = 8;
+    constexpr auto kInitialBackoff = std::chrono::microseconds(500);
+
+    DWORD last_err = 0;
+    auto backoff = kInitialBackoff;
+    for (int attempt = 0; attempt < kMaxAttempts; ++attempt) {
+        if (MoveFileExW(temp.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            return;
+        }
+        last_err = GetLastError();
+        if (last_err != ERROR_ACCESS_DENIED && last_err != ERROR_SHARING_VIOLATION) {
+            break;  // not a transient-contention signature; fail immediately
+        }
+        if (attempt + 1 < kMaxAttempts) {
+            std::this_thread::sleep_for(backoff);
+            backoff *= 2;
+        }
+    }
+    std::error_code ec_rm;
+    std::filesystem::remove(temp, ec_rm);
+    const std::error_code win_ec(static_cast<int>(last_err), std::system_category());
+    throw std::runtime_error("write_bytes_atomic: rename to " + target.string() + " failed: " + win_ec.message());
+}
+#endif
+
 }  // namespace
 
 void write_bytes_atomic(const std::filesystem::path& target, const void* bytes, std::size_t size, bool restrict_perms) {
@@ -153,6 +194,9 @@ void write_bytes_atomic(const std::filesystem::path& target, const void* bytes, 
         // perm_ec ignored — owner-only is best-effort (no-op on Windows
         // where the POSIX permission model doesn't apply).
     }
+#if defined(__ISWINDOWS__)
+    windows_replace_rename(temp, target);
+#else
     std::error_code rename_ec;
     std::filesystem::rename(temp, target, rename_ec);
     if (rename_ec) {
@@ -160,6 +204,7 @@ void write_bytes_atomic(const std::filesystem::path& target, const void* bytes, 
         std::filesystem::remove(temp, ec_rm);
         throw std::runtime_error("write_bytes_atomic: rename to " + target.string() + " failed: " + rename_ec.message());
     }
+#endif
 }
 
 // ---- make_dirs --------------------------------------------------------------

@@ -14,11 +14,20 @@
 /// Atomically write `size` bytes from `bytes` to `target`.
 ///
 /// Writes to a sibling `<target>.tmp.<process-salt>.<seq>` first, then
-/// `std::filesystem::rename`s onto the target.  The rename is atomic on
-/// POSIX same-filesystem and on Win32 (replace-existing semantics), so
-/// concurrent writers in different processes / threads either see the
-/// previous complete file or one complete writer's payload — never a
-/// partial-write file on the visible path.
+/// replaces `target` with it. On POSIX this is `std::filesystem::rename`
+/// (atomic on a same-filesystem rename). On Windows this calls
+/// `MoveFileExW` directly with `MOVEFILE_REPLACE_EXISTING |
+/// MOVEFILE_WRITE_THROUGH`, retrying a small bounded number of times on
+/// `ERROR_ACCESS_DENIED` / `ERROR_SHARING_VIOLATION` — the documented
+/// Win32 signatures of transient contention when several threads race a
+/// rename onto the same destination (`std::filesystem::rename` alone was
+/// observed to surface exactly this as an escaping exception under that
+/// race — CoolProp-4no.2). Either way, concurrent writers in different
+/// processes / threads either see the previous complete file or one
+/// complete writer's payload — never a partial-write file on the visible
+/// path. A persistent failure (any other error, or the same error after
+/// the Windows retry budget is exhausted) is still reported as a thrown
+/// exception, below.
 ///
 /// The temp-path suffix combines a process-unique 64-bit salt (drawn
 /// once per process from `std::random_device`) with a process-local

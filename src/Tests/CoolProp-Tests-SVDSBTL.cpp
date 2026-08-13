@@ -1304,6 +1304,14 @@ TEST_CASE("write_bytes_atomic is race-safe across threads", "[SVDSBTL][cache][ra
         payloads[i].assign(kPayloadSize, static_cast<char>(i + 1));  // distinct fill bytes per thread
     }
 
+    // Worker-thread diagnostics, one slot per thread index. Each thread
+    // writes only its own element, so this needs no lock (CoolProp-4no.2 /
+    // CoolProp-tw7t): an exception escaping a std::thread's entry function
+    // calls std::terminate() and aborts the whole process instead of
+    // failing this one test, so every writer must catch its own exception
+    // here and report it back through Catch2 after all threads join.
+    std::vector<std::string> thread_errors(kThreads);
+
     std::atomic<bool> go{false};
     std::vector<std::thread> threads;
     threads.reserve(kThreads);
@@ -1312,12 +1320,25 @@ TEST_CASE("write_bytes_atomic is race-safe across threads", "[SVDSBTL][cache][ra
             while (!go.load(std::memory_order_acquire)) {
                 std::this_thread::yield();
             }
-            ::write_bytes_atomic(target, payloads[i].data(), payloads[i].size(), /*restrict_perms=*/false);
+            try {
+                ::write_bytes_atomic(target, payloads[i].data(), payloads[i].size(), /*restrict_perms=*/false);
+            } catch (const std::exception& e) {
+                thread_errors[i] = e.what();
+            } catch (...) {
+                thread_errors[i] = "unknown non-std::exception thrown";
+            }
         });
     }
     go.store(true, std::memory_order_release);
     for (auto& t : threads) {
         t.join();
+    }
+
+    // Surface any worker failure as a normal test failure (not a silent
+    // pass) before looking at the resulting file at all.
+    for (int i = 0; i < kThreads; ++i) {
+        INFO("thread " << i << " error: " << thread_errors[i]);
+        REQUIRE(thread_errors[i].empty());
     }
 
     // Read back: file must exist and match EXACTLY one writer's payload.
