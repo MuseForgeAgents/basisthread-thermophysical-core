@@ -412,4 +412,85 @@ build_catch_msvc_md\CatchTestRunner.exe "~[slow]~[SVDSBTL]~[SBTL]~[SVD]~[Region]
 
 ---
 
-*End of investigation. No fix was attempted for the §4 link failure, the §10 CRT-configuration validation, or the §11 SVDSBTL crash localization — per instructions. One system-level tool (WinDbg/cdb, via winget) was installed to support §11.4; no repository file besides this report was touched. Verification follows in the next tool call.*
+## 12. [2026-08-13, corrective action] Windows Atomic-Write Portability Fix
+
+**This section documents a fix.** It does not alter, retract, or supersede any evidence in §10 or §11 — those sections remain the historical record of the original failure and its localization, unmodified. Performed on a new branch, `bt-windows-atomic-write-fix`, created from the clean, committed `bt-baseline-validation` tip. This is a software-portability correction only: no thermodynamic equation, fluid data, correlation, EOS implementation, transport model, or tolerance was touched.
+
+### 12.1 Root cause (recap from §11.4, unchanged)
+
+`write_bytes_atomic()` (`src/CPfilepaths.cpp`) used cross-platform `std::filesystem::rename()` to atomically replace a cache-file target with a freshly-written temp sibling. Under the 16-way concurrent-writer race the test deliberately constructs, Windows' underlying `MoveFileExW` call — reached transitively through `std::filesystem::rename` — was observed to fail with `ERROR_ACCESS_DENIED` when multiple threads raced a rename onto the same destination path (a genuine Win32/NTFS behavior with no POSIX `rename()` analogue). `write_bytes_atomic()` correctly threw `std::runtime_error` on that failure, but the test's `std::thread` worker lambdas had no `try`/`catch`, so the exception escaped the thread entry function and the C++ standard's mandated response — `std::terminate()` → `abort()` — took down the whole process, surfacing as Windows exception `0xC0000409` (`FAST_FAIL_FATAL_APP_EXIT`, not a memory-safety bug — confirmed in §11.4/§11.5).
+
+### 12.2 Implementation correction
+
+**`include/CoolProp/detail/atomic_write.h`** — updated the documented contract's doc comment to describe the corrected Windows behavior (native `MoveFileExW` + bounded retry) in place of the previous, now-inaccurate claim that `std::filesystem::rename` alone provides reliable replace-existing semantics on Win32. No signature change; the function's observable contract (never a partial-write file, one complete writer's payload survives, genuine persistent errors still throw) is unchanged and now more accurately documented.
+
+**`src/CPfilepaths.cpp`** — added a Windows-only `windows_replace_rename()` helper, called from `write_bytes_atomic()` in place of `std::filesystem::rename` **only on Windows** (`#if defined(__ISWINDOWS__)`); the non-Windows path is byte-for-byte unchanged:
+
+- Calls `MoveFileExW` directly with `MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH` (the durability flag, appropriate here since these are meant-to-persist cache files — matches the task's "if appropriate for durability" guidance).
+- Retries **only** on `ERROR_ACCESS_DENIED` or `ERROR_SHARING_VIOLATION` — the two Win32 codes Microsoft documents as "another handle is momentarily using this path." Any other error fails immediately, on the first attempt — **no blanket swallowing of `ERROR_ACCESS_DENIED`.**
+- Bounded retry: up to 8 attempts, exponential backoff starting at 500 μs (500 μs, 1 ms, 2 ms, 4 ms, …), worst case well under 100 ms total — long enough to resolve a same-process thread race, short enough not to mask a persistent failure or meaningfully slow normal use.
+- After the retry budget is exhausted (or on a non-retryable error), removes the orphaned temp file and throws `std::runtime_error` with the underlying Windows error's message text (`std::error_code(win_err, std::system_category()).message()`) — same throw style, same message prefix (`"write_bytes_atomic: rename to ... failed: ..."`) as the pre-existing POSIX-path error, so callers see one consistent error shape regardless of platform.
+
+**`src/Tests/CoolProp-Tests-SVDSBTL.cpp`** (`write_bytes_atomic is race-safe across threads`) — each of the 16 worker-thread lambdas now wraps its `write_bytes_atomic()` call in `try { ... } catch (const std::exception&) { ... } catch (...) { ... }`, recording any caught message into a pre-sized `std::vector<std::string> thread_errors(kThreads)` (one slot per thread index — no lock needed, each thread writes only its own element). After all threads join, the test asserts `REQUIRE(thread_errors[i].empty())` for every thread **before** touching the resulting file. **This does not turn a failure into a pass**: a caught exception now fails the specific `REQUIRE` for that thread index, with the captured message shown via `INFO`, exactly like any other Catch2 assertion failure — it simply fails the test *normally* instead of aborting the process and losing all diagnostic output.
+
+Exact diff (`git diff --stat` on `bt-windows-atomic-write-fix` vs `bt-baseline-validation`):
+```
+include/CoolProp/detail/atomic_write.h | 19 ++++++++++----
+src/CPfilepaths.cpp                    | 45 ++++++++++++++++++++++++++++++++++
+src/Tests/CoolProp-Tests-SVDSBTL.cpp   | 23 ++++++++++++++++-
+3 files changed, 81 insertions(+), 6 deletions(-)
+```
+**Only these three files changed** — no CMake file, no scientific/fluid-data file, no tolerance, no other test file.
+
+### 12.3 Tests performed (in the order requested)
+
+All runs used the already-validated `build_catch_msvc_md` configuration (`CMP0091=NEW`, `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL`, `/MD` throughout — §10), rebuilt incrementally against the fix, plus the `build_catch_asan` directory (§11.5) rebuilt incrementally with the same fix for step 6.
+
+| # | Scope | Command | Result |
+|---|---|---|---|
+| 1 | Isolated reproducer | `CatchTestRunner.exe "write_bytes_atomic is race-safe across threads" -s` | **Pass.** Exit 0, 21/21 assertions, all 16 `thread_errors[i]` empty, file matched exactly one payload, 0 leftover temps. |
+| 2 | Concurrency stability | Same test, 30 consecutive fresh-process invocations | **30/30 passed, 0 failed.** `grep -c "All tests passed"` = 30 on the aggregate log; no `FAILED` anywhere. |
+| 3 | Complete SVDSBTL/SBTL/SVD/Region family | `CatchTestRunner.exe "[SVDSBTL],[SBTL],[SVD],[region]"` (verified via `--list-tests` to include the `[slow]`-tagged members — the family total is 128 either way, i.e. no member of this tag family is excluded when `~[slow]` is appended to a comma-list, since the exclusion binds only to the last OR-segment; confirmed by direct `--list-tests` comparison) | **128 test cases, 120 passed, 8 skipped, 0 failed.** 9,780/9,780 assertions passed. All 8 skips carry a REFPROP-absence message (`REFPROP not available; skipping <...>`), individually enumerated and none any other reason. |
+| 4 | Previous non-SVDSBTL baseline | `CatchTestRunner.exe "~[slow]~[SVDSBTL]~[SBTL]~[SVD]~[Region]~[SVDComponents]~[SVDSurface]"` | **347 test cases, 320 passed, 27 skipped, 0 failed** — 159,008/159,008 assertions. **Identical to the §11.6 pre-fix baseline** (same counts, same skip reasons) — confirms zero regression. |
+| 5 | Documented broad baseline suite | `CatchTestRunner.exe "~[slow]"` — the exact command from `CLAUDE.md`, and the exact scope that crashed with `0xC0000409` before this fix (§10/§11) | **415 test cases, 386 passed, 29 skipped, 0 failed** — 161,701/161,701 assertions. Exit code 0. **This is the full documented baseline, previously unable to complete at all, now passing end-to-end.** All 30 individual `SKIPPED:` messages (29 test cases, one with two skip sections) verified REFPROP-absence-only (3 message variants, all REFPROP-related; none other). |
+| 6 | MSVC ASan on the reproducer | `build_catch_asan\CatchTestRunner.exe "write_bytes_atomic is race-safe across threads" -s` (ASan build rebuilt incrementally against the fix; re-verified 199/199 TUs still carry `/fsanitize=address` + `/MD` before rebuilding) | **Pass.** Exit 0, 21/21 assertions, **zero ASan diagnostic output** (stdout and stderr both empty of any `AddressSanitizer` report) — no memory error, consistent with §11.4/§11.5's finding that this was never a memory-safety defect. |
+
+**REFPROP skips, recorded separately as requested:** every skip across all six verification runs carries one of exactly three message strings, all attributable solely to REFPROP being absent from this environment: `Skipping: REFPROP not supported in this environment.`, `REFPROP not available; skipping <specific-test-purpose>`, and the `SVDSBTLBackend`/cache-key-disambiguation variants of the same. **Zero skips for any other reason** were found in any run.
+
+**Temp-file residue:** zero, after every run in this section. Checked directly (`%TEMP%\coolprop_svdtables_atomic_race_*`) after runs 1, 2 (all 30), and 5 (the full suite, which exercises this test as part of its normal sweep) — no directory left behind in any case, consistent with the test's own `leftover_temps == 0` assertion passing every time and its final `fs::remove_all(tmpdir, ec)` now always being reached (the process no longer aborts before reaching it). Nine pre-fix residue directories from the §11.4/§11.5 crash-investigation runs (timestamps predating this fix's build) were found and removed as part of this work; they were not created by the fix and are unrelated to it.
+
+**Windows filesystem errors observed:** none, in any run under the fix. (Contrast with the pre-fix `ERROR_ACCESS_DENIED` documented in §11.4 — the fix's bounded retry absorbs that transient condition; §11.4's captured evidence of it is left untouched as the historical record.)
+
+### 12.4 Acceptance criteria — final status
+
+| Criterion | Status |
+|---|---|
+| Atomic-write race test no longer aborts | ✅ §12.3 run 1 |
+| Repeated concurrency run is stable | ✅ §12.3 run 2 (30/30) |
+| No swallowed persistent permission error | ✅ §12.2 — only `ERROR_ACCESS_DENIED`/`ERROR_SHARING_VIOLATION` retried, bounded, still throws after budget |
+| No partial file observed | ✅ every run asserts `result.size() == kPayloadSize` |
+| Final target equals one complete writer payload | ✅ every run asserts `matched_one` |
+| No stale temp files remain | ✅ §12.3, verified independently of the test's own assertion |
+| SVDSBTL family passes except legitimate environment-related skips | ✅ §12.3 run 3 (128/120/8-REFPROP/0) |
+| Previously passing 347-case core baseline remains regression-free | ✅ §12.3 run 4, identical counts to §11.6 |
+| ASan reports no memory error | ✅ §12.3 run 6 |
+| Only files directly necessary for the portability fix and its test are changed | ✅ §12.2 — 3 files, diff shown |
+
+**All acceptance criteria met.**
+
+### 12.5 Final status
+
+The Windows portability defect identified and localized in §11 is corrected. The documented broad baseline suite (`CatchTestRunner.exe "~[slow]"`, `CLAUDE.md`'s canonical command) — which previously could not complete on this toolchain (§10/§11) — now runs to completion with 0 failures. The §11.7 classification (shared infrastructure defect in `write_bytes_atomic()`, exposed by SVDSBTL, with a contributing test-harness exception-safety gap) is confirmed by the fix's success: correcting exactly the two components identified there (the rename helper's Windows behavior, and the test's exception handling) resolves the crash with no other change needed anywhere in the codebase.
+
+**Updated overall baseline status**, superseding §11.8's "Blocked" row 3 for this specific defect (§11.8 itself is left unmodified as the historical record; this table reflects the state as of this corrective action):
+
+| # | Layer | Status |
+|---|---|---|
+| 1 | Windows build configuration | ✅ Resolved (§10, unchanged) |
+| 2 | Core CoolProp tests excluding SVDSBTL subsystem | ✅ Passing, regression-free (§12.3 run 4) |
+| 3 | SVDSBTL subsystem | ✅ **Now passing** (§12.3 runs 1–3, 6) — the `write_bytes_atomic` race defect is fixed; remainder of the family (tests unaffected by this defect) was already passing per §11.6 and reconfirmed here |
+| 4 | BasisThread engineering validation | ✅ Not affected, and now further corroborated: the full documented baseline suite (§12.3 run 5) — which exercises everything, not just the non-SVDSBTL subset — passes end-to-end for the first time in this investigation |
+
+---
+
+*End of corrective-action documentation. Fix implemented, built, and verified per the tests in §12.3; no source correction was applied to §10's or §11's historical evidence. Not merged — per instructions. Commit and push details follow in the next tool call.*
